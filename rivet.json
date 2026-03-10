@@ -1,0 +1,10 @@
+{
+	"actors": {
+		"opensentient": { "module": "./actor/index.ts" }
+	},
+	"sandbox": {
+		"image": "ghcr.io/archive-energy/opensentient:latest",
+		"port": 8080,
+		"workdir": "/workspace"
+	}
+}

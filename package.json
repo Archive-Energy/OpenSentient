@@ -1,0 +1,28 @@
+{
+	"name": "opensentient",
+	"version": "0.1.0",
+	"type": "module",
+	"license": "MIT",
+	"scripts": {
+		"dev": "bun run --watch actor/index.ts",
+		"build": "bun build actor/index.ts --outdir dist --target bun",
+		"rebuild-index": "bun run actor/rebuild.ts",
+		"test": "bun test",
+		"check": "biome check .",
+		"format": "biome format --write ."
+	},
+	"dependencies": {
+		"rivetkit": "^2.1.6",
+		"@sandbox-agent/persist-rivet": "0.3.x",
+		"sandbox-agent": "0.3.x",
+		"@daytonaio/sdk": "latest",
+		"hono": "^4",
+		"grammy": "^1",
+		"gray-matter": "^4"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1",
+		"@types/bun": "latest",
+		"typescript": "^5"
+	}
+}
