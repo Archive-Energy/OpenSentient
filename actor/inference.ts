@@ -1,12 +1,19 @@
-import type { ModelRole } from "./types"
+import type { InferenceResult, ModelRole, TokenUsage } from "./types"
 
 // ── Key Resolution ────────────────────────────────────────────────────
 
-export function resolveKey(ref: string): string {
-	const match = ref.match(/^\$\{(.+)\}$/)
-	if (!match) return ref
-	const value = process.env[match[1]]
-	if (!value) throw new Error(`Missing env var: ${match[1]}`)
+const PROVIDER_KEY_MAP: Record<string, string> = {
+	anthropic: "ANTHROPIC_API_KEY",
+	openrouter: "OPENROUTER_API_KEY",
+	openai: "OPENAI_API_KEY",
+}
+
+/** Resolve API key from provider name by convention. */
+export function resolveProviderKey(provider: string): string {
+	const envVar = PROVIDER_KEY_MAP[provider]
+	if (!envVar) throw new Error(`Unknown provider: ${provider} (no key mapping)`)
+	const value = process.env[envVar]
+	if (!value) throw new Error(`Missing env var: ${envVar} (for provider "${provider}")`)
 	return value
 }
 
@@ -30,8 +37,8 @@ export async function actorInfer(
 	config: ModelRole,
 	systemPrompt: string,
 	userPrompt: string,
-): Promise<string> {
-	const key = resolveKey(config.key)
+): Promise<InferenceResult> {
+	const key = resolveProviderKey(config.provider ?? "anthropic")
 	const endpoint = resolveEndpoint(config.provider ?? "anthropic")
 
 	if (config.provider === "anthropic") {
@@ -53,8 +60,17 @@ export async function actorInfer(
 			const body = await res.text()
 			throw new Error(`Actor inference failed (${res.status}): ${body}`)
 		}
-		const data = (await res.json()) as { content: Array<{ text: string }> }
-		return data.content[0]?.text ?? ""
+		const data = (await res.json()) as {
+			content: Array<{ text: string }>
+			usage?: { input_tokens?: number; output_tokens?: number }
+		}
+		return {
+			text: data.content[0]?.text ?? "",
+			usage: {
+				inputTokens: data.usage?.input_tokens ?? 0,
+				outputTokens: data.usage?.output_tokens ?? 0,
+			},
+		}
 	}
 
 	// OpenRouter / OpenAI compatible
@@ -79,6 +95,13 @@ export async function actorInfer(
 	}
 	const data = (await res.json()) as {
 		choices: Array<{ message: { content: string } }>
+		usage?: { prompt_tokens?: number; completion_tokens?: number }
 	}
-	return data.choices[0]?.message?.content ?? ""
+	return {
+		text: data.choices[0]?.message?.content ?? "",
+		usage: {
+			inputTokens: data.usage?.prompt_tokens ?? 0,
+			outputTokens: data.usage?.completion_tokens ?? 0,
+		},
+	}
 }

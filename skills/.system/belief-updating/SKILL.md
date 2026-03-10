@@ -4,6 +4,7 @@ description: Update position confidence from credible signals using
   Bayesian reasoning. Layer 2 of the Alethic Method. Apply after
   signal passes evaluation. Computes surprise_delta and new confidence.
   High surprise_delta flags the position as a tension.
+runtime: sandbox
 ---
 
 # Belief Updating

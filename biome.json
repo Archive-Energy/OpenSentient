@@ -16,6 +16,12 @@
 			"semicolons": "asNeeded"
 		}
 	},
+	"json": {
+		"parser": {
+			"allowComments": true,
+			"allowTrailingCommas": true
+		}
+	},
 	"files": {
 		"ignore": ["node_modules", "dist", "knowledge"]
 	}

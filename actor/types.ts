@@ -12,6 +12,18 @@ export type TensionStatus =
 
 export type InquiryStatus = "open" | "active" | "promoted" | "resolved" | "closed"
 
+// ── Inference ─────────────────────────────────────────────────────────
+
+export interface TokenUsage {
+	inputTokens: number
+	outputTokens: number
+}
+
+export interface InferenceResult {
+	text: string
+	usage: TokenUsage
+}
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 export const SIGNAL_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
@@ -32,15 +44,15 @@ export interface Domain {
 
 export interface ModelRole {
 	provider?: string // "anthropic" | "openrouter" | "openai"
-	key: string // "${ENV_VAR}" reference
 	name: string // model ID
 	dimensions?: number // embedding only
 }
 
 export type HarnessBackend = "opencode" | "claude" | "codex" | "amp"
 
-export interface SandboxModelConfig extends Omit<ModelRole, "provider"> {
+export interface SandboxModelConfig {
 	harness: HarnessBackend
+	name: string // model ID
 }
 
 export interface ModelConfig {
@@ -54,7 +66,6 @@ export interface ModelConfig {
 export interface RepoConfig {
 	url: string
 	branch_prefix: string
-	auth: string // "${GITHUB_TOKEN}"
 	auto_pr: boolean
 	pr_reviewers: string[]
 	default_base: string
@@ -64,13 +75,17 @@ export interface RepoConfig {
 
 export interface IngestSignal {
 	id: string
-	sourceProvider: string // "parallel_systems" | "exa" | "owner" | "correction"
+	sourceProvider: string // "parallel" | "owner" | "correction" | "x402"
 	sourceMode: string // "webhook" | "poll" | "command" | "system"
 	content: string
 	urgency: "low" | "medium" | "high"
 	credibility: number // 0.0 - 1.0
 	timestamp: number
 	metadata?: Record<string, unknown>
+	x402Source?: {
+		sentientId: string
+		cost: number // USDC paid
+	}
 }
 
 // ── Agent Commands ────────────────────────────────────────────────────
@@ -125,6 +140,7 @@ export interface SessionSummary {
 	artifacts: {
 		pullRequests: PullRequestArtifact[]
 	}
+	tokenUsage?: TokenUsage // Sandbox session token usage (from ACP)
 }
 
 // ── Calibration ───────────────────────────────────────────────────────
@@ -174,6 +190,9 @@ export type CalibrationEvent =
 	| { type: "inquiryRaised"; slug: string; tension: number }
 	| { type: "thresholdAdjusted"; value: number }
 	| { type: "heartbeat" }
+	| { type: "budgetExhausted"; spentUsd: number; dailyBudgetUsd: number }
+	| { type: "budgetReset"; dailyBudgetUsd: number }
+	| { type: "triageComplete"; action: TriageAction; slug: string }
 
 // ── Actor State ───────────────────────────────────────────────────────
 
@@ -192,6 +211,61 @@ export interface SentientState {
 	telegramChatId: number | null
 	dirty: boolean
 	cachedAgentsMdBody: string | null
+	budgetState: BudgetState
+	triageEnabled: boolean
+	modelPricingCache: ModelPricingCache | null
+}
+
+// ── Triage ────────────────────────────────────────────────────────────
+
+export type TriageAction = "confirm" | "update" | "contradict" | "new_territory"
+
+export interface TriageResult {
+	action: TriageAction
+	positions: string[] // affected position slugs
+	reasoning: string
+	confidenceNudge?: number // for confirm/update (±0.01-0.05)
+	newText?: string // for update — the updated position text
+	contradictionNature?: string // for contradict
+	newTerritoryDescription?: string // for new_territory
+}
+
+// ── Budget & Cost ─────────────────────────────────────────────────────
+
+export interface BudgetState {
+	dailyBudgetUsd: number
+	x402AllocationPct: number
+	spentTodayUsd: number
+	lastResetAt: number // epoch ms (midnight UTC)
+	sessionsToday: number
+	triagesToday: number
+	scansToday: number
+	x402SpentTodayUsd: number
+}
+
+export interface CostRecord {
+	type: "triage" | "scan" | "session" | "embedding" | "x402_purchase"
+	costUsd: number
+	tokenUsage?: TokenUsage
+	timestamp: number
+}
+
+export interface ModelPricingCache {
+	data: Record<string, { models: Record<string, { cost: { input: number; output: number } }> }>
+	fetchedAt: number // epoch ms
+}
+
+// ── Skill Metadata ────────────────────────────────────────────────────
+
+export type SkillRuntime = "actor" | "sandbox"
+
+export interface SkillMeta {
+	name: string
+	description: string
+	runtime?: SkillRuntime
+	escalate_to?: SkillRuntime
+	trigger?: string
+	layer?: string
 }
 
 // ── Skill Config ──────────────────────────────────────────────────────
@@ -212,38 +286,131 @@ export interface SkillsConfig {
 // ── Integrations ──────────────────────────────────────────────────────
 
 export interface IntegrationsConfig {
-	parse?: { key: string }
-	telegram: { token: string }
+	parse?: boolean
+	telegram: boolean
 }
 
-// ── AGENTS.md Parsed Config ───────────────────────────────────────────
+// ── Sentient Config Schema (Zod) ──────────────────────────────────────
 
-export interface AgentsConfig {
-	name: string
-	namespace: string
-	domain: Domain
-	models: ModelConfig
-	session: {
-		threshold: number
-		calibration_threshold: number
-		daily_scan: boolean
-		scan_interval_hours: number
-		session_cooldown_minutes: number
-		signal_ttl_days: number
-	}
-	signals: Record<string, Record<string, unknown>>
-	repos: RepoConfig[]
-	skills: SkillsConfig
-	integrations: IntegrationsConfig
-	api: {
-		discovery: boolean
-		public_skills: boolean
-		public_positions: boolean
-		public_inquiries: boolean
-	}
-	seed_positions: Array<{
-		slug: string
-		text: string
-		confidence: number
-	}>
-}
+import { z } from "zod"
+
+const ModelRoleSchema = z.object({
+	provider: z.string().optional(),
+	name: z.string(),
+	dimensions: z.number().optional(),
+})
+
+const SandboxModelSchema = z.object({
+	harness: z.enum(["opencode", "claude", "codex", "amp"]),
+	name: z.string(),
+})
+
+const SkillSourceSchema = z.object({
+	type: z.enum(["github", "local", "git"]),
+	source: z.string(),
+	skills: z.array(z.string()).optional(),
+	ref: z.string().optional(),
+	subpath: z.string().optional(),
+})
+
+export const SentientConfigSchema = z
+	.object({
+		name: z.string(),
+		namespace: z.string().optional(),
+		domain: z.object({
+			name: z.string(),
+			description: z.string(),
+			boundaries: z.array(z.string()),
+			adjacencies: z.array(z.string()),
+		}),
+		models: z.object({
+			actor: ModelRoleSchema,
+			embedding: ModelRoleSchema,
+			sandbox: SandboxModelSchema,
+		}),
+		session: z.object({
+			threshold: z.number(),
+			calibration_threshold: z.number(),
+			daily_scan: z.boolean(),
+			scan_interval_hours: z.number(),
+			session_cooldown_minutes: z.number(),
+			signal_ttl_days: z.number(),
+		}),
+		signals: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+		repos: z
+			.array(
+				z.object({
+					url: z.string(),
+					branch_prefix: z.string(),
+					auto_pr: z.boolean(),
+					pr_reviewers: z.array(z.string()),
+					default_base: z.string(),
+				}),
+			)
+			.optional(),
+		skills: z.object({
+			curated: z.array(SkillSourceSchema),
+			system_external: z.array(SkillSourceSchema),
+		}),
+		integrations: z
+			.object({
+				parse: z.boolean().optional(),
+				telegram: z.boolean(),
+			})
+			.passthrough(),
+		api: z.object({
+			discovery: z.boolean(),
+			public_skills: z.boolean(),
+			public_positions: z.boolean(),
+			public_inquiries: z.boolean(),
+		}),
+		seed_positions: z
+			.array(
+				z.object({
+					slug: z.string(),
+					text: z.string(),
+					confidence: z.number(),
+				}),
+			)
+			.optional(),
+		// v0.2 — all optional for backward compat
+		budget: z
+			.object({
+				daily_usd: z.number(),
+				x402_allocation_pct: z.number(),
+				triage_enabled: z.boolean().optional(),
+			})
+			.optional(),
+		payments: z
+			.object({
+				enabled: z.boolean(),
+				stripe_connected_account: z.string(),
+				default_pricing: z.record(z.string(), z.string()),
+			})
+			.optional(),
+		wallet: z
+			.object({
+				autonomous_spending: z.object({
+					enabled: z.boolean(),
+					monthly_budget_usdc: z.number(),
+					per_query_limit_usdc: z.number(),
+					require_approval_above: z.number(),
+				}),
+			})
+			.optional(),
+		registry: z
+			.object({
+				url: z.string(),
+			})
+			.optional(),
+		brief: z
+			.object({
+				source: z.string(),
+				last_generated: z.string(),
+				generation_model: z.string(),
+			})
+			.optional(),
+	})
+	.passthrough()
+
+export type AgentsConfig = z.infer<typeof SentientConfigSchema>

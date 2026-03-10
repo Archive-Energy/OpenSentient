@@ -80,9 +80,10 @@ export function registerOnboarding(bot: Bot): void {
 					return
 				}
 
-				// Build minimal AGENTS.md and initialize
-				const agentsMd = buildAgentsMd(session)
-				await actor.initialize(agentsMd)
+				// Build config + instructions and initialize
+				const configJsonc = buildSentientJsonc(session)
+				const instructions = buildInstructions(session)
+				await actor.initialize(configJsonc, instructions)
 				await actor.setTelegramChatId(ctx.chat.id)
 
 				sessions.delete(ctx.chat.id)
@@ -93,58 +94,52 @@ export function registerOnboarding(bot: Bot): void {
 	})
 }
 
-// ── AGENTS.md Builder ─────────────────────────────────────────────────
+// ── Config Builder ────────────────────────────────────────────────────
 
-function buildAgentsMd(session: OnboardingSession): string {
-	const seeds = session.seeds
-		.map((s, i) => `  - slug: seed-${i + 1}\n    text: "${s}"\n    confidence: 0.7`)
-		.join("\n")
+function buildSentientJsonc(session: OnboardingSession): string {
+	const slug = session.domain.toLowerCase().replace(/\s+/g, "-")
+	const config = {
+		name: slug,
+		domain: {
+			name: session.domain,
+			description: `Expert intelligence on ${session.domain}`,
+			boundaries: session.boundaries,
+			adjacencies: [],
+		},
+		models: {
+			actor: { provider: "anthropic", name: "claude-haiku-4-5" },
+			embedding: { provider: "openrouter", name: "baai/bge-m3", dimensions: 1024 },
+			sandbox: { harness: "opencode", name: "claude-opus-4-6" },
+		},
+		session: {
+			threshold: 0.6,
+			calibration_threshold: 0.4,
+			daily_scan: true,
+			scan_interval_hours: 24,
+			session_cooldown_minutes: 1,
+			signal_ttl_days: 7,
+		},
+		skills: { curated: [], system_external: [] },
+		integrations: { telegram: true },
+		api: {
+			discovery: true,
+			public_skills: true,
+			public_positions: false,
+			public_inquiries: false,
+		},
+		seed_positions: session.seeds.map((s, i) => ({
+			slug: `seed-${i + 1}`,
+			text: s,
+			confidence: 0.7,
+		})),
+	}
+	return JSON.stringify(config, null, "\t")
+}
 
+// ── Instructions Builder ──────────────────────────────────────────────
+
+function buildInstructions(session: OnboardingSession): string {
 	return [
-		"---",
-		`name: ${session.domain.toLowerCase().replace(/\s+/g, "-")}`,
-		"domain:",
-		`  name: ${session.domain}`,
-		`  description: Expert intelligence on ${session.domain}`,
-		"  boundaries:",
-		...session.boundaries.map((b) => `    - ${b}`),
-		"  adjacencies: []",
-		"models:",
-		"  actor:",
-		"    provider: anthropic",
-		"    key: ${ANTHROPIC_API_KEY}",
-		"    name: claude-haiku-4-5",
-		"  embedding:",
-		"    provider: openrouter",
-		"    key: ${EMBEDDING_API_KEY}",
-		"    name: baai/bge-m3",
-		"    dimensions: 1024",
-		"  sandbox:",
-		"    harness: opencode",
-		"    key: ${HARNESS_KEY}",
-		"    name: claude-opus-4-6",
-		"session:",
-		"  threshold: 0.6",
-		"  calibration_threshold: 0.4",
-		"  daily_scan: true",
-		"  scan_interval_hours: 24",
-		"  session_cooldown_minutes: 1",
-		"  signal_ttl_days: 7",
-		"repos: []",
-		"skills:",
-		"  curated: []",
-		"  system_external: []",
-		"integrations:",
-		"  telegram:",
-		"    token: ${TELEGRAM_BOT_TOKEN}",
-		"api:",
-		"  discovery: true",
-		"  public_skills: true",
-		"  public_positions: false",
-		"  public_inquiries: false",
-		seeds ? `seed_positions:\n${seeds}` : "seed_positions: []",
-		"---",
-		"",
 		`# ${session.domain} Intelligence`,
 		"",
 		`You are a domain intelligence agent specializing in ${session.domain}.`,

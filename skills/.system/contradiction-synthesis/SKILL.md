@@ -4,6 +4,7 @@ description: Resolve contradictions between positions by finding
   synthesis rather than choosing sides. Layer 3 of the Alethic Method.
   Apply when two positions directly contradict each other. The
   contradiction is information — find the third truth it reveals.
+runtime: sandbox
 ---
 
 # Contradiction Synthesis

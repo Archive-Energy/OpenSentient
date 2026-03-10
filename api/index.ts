@@ -1,6 +1,8 @@
+import type { Context } from "hono"
 import { Hono } from "hono"
 import { handleCalibration } from "./sentient/calibration"
 import { handleGet } from "./sentient/get"
+import { handleIdentity } from "./sentient/identity"
 import { handleKnowledge } from "./sentient/knowledge"
 import { handlePost } from "./sentient/post"
 import { handleStream } from "./sentient/stream"
@@ -9,14 +11,16 @@ const app = new Hono()
 
 // ── Auth Middleware ────────────────────────────────────────────────────
 
-import type { Context } from "hono"
-
 const authMiddleware = async (c: Context, next: () => Promise<void>) => {
 	const apiKey = c.req.header("x-api-key") ?? c.req.header("authorization")?.replace("Bearer ", "")
 	if (!apiKey) return c.text("Unauthorized", 401)
 	// Unkey validation would go here — for now accept any key
 	await next()
 }
+
+// ── CIMD Identity (public, no auth) ───────────────────────────────────
+
+app.get("/.well-known/sentient.json", (c) => handleIdentity(c))
 
 // ── Public Routes ─────────────────────────────────────────────────────
 

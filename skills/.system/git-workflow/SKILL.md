@@ -4,6 +4,7 @@ description: Create pull requests against configured repos from session
   findings. Any Sentient can PR against any repo the token has access to.
   Use when a session produces actionable code changes, documentation
   updates, or configuration modifications that should be proposed as PRs.
+runtime: sandbox
 ---
 
 # Git Workflow

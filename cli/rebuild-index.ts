@@ -9,9 +9,9 @@
 
 import { readdir } from "node:fs/promises"
 import matter from "gray-matter"
-import { parseAgentsMd } from "./materialize"
-import { embed } from "./tension"
-import type { ModelRole } from "./types"
+import { parseSentientConfig } from "../actor/materialize"
+import { embed } from "../actor/tension"
+import type { ModelRole } from "../actor/types"
 
 const shouldEmbed = process.argv.includes("--embed")
 
@@ -42,15 +42,15 @@ async function main() {
 	console.log("REBUILD INDEX")
 	console.log("─".repeat(50))
 
-	// Read AGENTS.md for embedding config
+	// Read sentient.jsonc for embedding config
 	let embeddingConfig: ModelRole | null = null
 	try {
-		const agentsMdRaw = await Bun.file("AGENTS.md").text()
-		const { config } = parseAgentsMd(agentsMdRaw)
+		const configJsonc = await Bun.file("sentient.jsonc").text()
+		const config = parseSentientConfig(configJsonc)
 		embeddingConfig = config.models.embedding
 	} catch {
 		if (shouldEmbed) {
-			console.error("  Cannot embed: AGENTS.md not found or invalid")
+			console.error("  Cannot embed: sentient.jsonc not found or invalid")
 			process.exit(1)
 		}
 	}
@@ -155,7 +155,7 @@ async function main() {
 		console.log("  Running embedding pass...")
 		for (const p of positions) {
 			try {
-				const embedding = await embed(p.content, embeddingConfig)
+				const { embedding } = await embed(p.content, embeddingConfig)
 				console.log(`    Embedded: ${p.slug} (${embedding.length} dims)`)
 			} catch (err) {
 				console.warn(`    Failed: ${p.slug} — ${err}`)

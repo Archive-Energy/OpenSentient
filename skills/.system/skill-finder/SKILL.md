@@ -4,6 +4,7 @@ description: Find and evaluate skills from external sources for capability gaps.
   Meta skill of the Alethic Method. Use when a task pattern recurs that
   the Sentient has no skill for, or when a capability gap slows domain
   exploration. Searches npx skills find and evaluates candidates.
+runtime: sandbox
 ---
 
 # Skill Finder

@@ -6,6 +6,7 @@ description: Reflect on whether the Sentient's methodology is well-matched
   skills are dormant, which position neighborhoods keep getting
   contradicted, and what patterns the Sentient keeps missing.
   All findings surface as inquiries — never mutates skills directly.
+runtime: sandbox
 ---
 
 # Method Reflection

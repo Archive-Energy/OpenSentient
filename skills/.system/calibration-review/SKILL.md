@@ -6,6 +6,8 @@ description: Evaluate whether confidence scores are calibrated against
   systematic over/underconfidence. Proposes adjustments autonomously.
   Numerical confidence adjustments commit automatically. Methodology
   changes surface as inquiries for human review.
+runtime: actor
+escalate_to: sandbox
 ---
 
 # Calibration Review

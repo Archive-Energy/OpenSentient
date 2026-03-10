@@ -1,19 +1,17 @@
 import { Bot, InlineKeyboard } from "grammy"
 import { registry } from "../../actor/index"
-import { resolveKey } from "../../actor/inference"
 import type { CalibrationEvent, PositionProofOfWork } from "../../actor/types"
 import { registerCommands } from "./commands"
-import { registerOnboarding } from "./onboard"
 
 // ── Bot Setup ─────────────────────────────────────────────────────────
 
 export function createBot(): Bot {
-	const token = resolveKey("${TELEGRAM_BOT_TOKEN}")
+	const token = process.env.TELEGRAM_BOT_TOKEN
+	if (!token) throw new Error("Missing env var: TELEGRAM_BOT_TOKEN")
 	const bot = new Bot(token)
 
 	// Register command handlers
 	registerCommands(bot)
-	registerOnboarding(bot)
 
 	return bot
 }

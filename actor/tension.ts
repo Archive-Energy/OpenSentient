@@ -1,5 +1,5 @@
-import { resolveEndpoint, resolveKey } from "./inference"
-import type { Domain, IngestSignal, ModelRole } from "./types"
+import { resolveEndpoint, resolveProviderKey } from "./inference"
+import type { Domain, IngestSignal, ModelRole, TokenUsage } from "./types"
 
 // ── Domain Relevance Gate ─────────────────────────────────────────────
 
@@ -36,8 +36,11 @@ export function isDomainRelevant(
 
 // ── Embedding ─────────────────────────────────────────────────────────
 
-export async function embed(text: string, config: ModelRole): Promise<Float32Array> {
-	const key = resolveKey(config.key)
+export async function embed(
+	text: string,
+	config: ModelRole,
+): Promise<{ embedding: Float32Array; usage: TokenUsage }> {
+	const key = resolveProviderKey(config.provider ?? "openrouter")
 	const endpoint = resolveEndpoint(config.provider ?? "openrouter")
 
 	const res = await fetch(`${endpoint}/embeddings`, {
@@ -60,8 +63,15 @@ export async function embed(text: string, config: ModelRole): Promise<Float32Arr
 
 	const data = (await res.json()) as {
 		data: Array<{ embedding: number[] }>
+		usage?: { prompt_tokens?: number; total_tokens?: number }
 	}
-	return new Float32Array(data.data[0].embedding)
+	return {
+		embedding: new Float32Array(data.data[0].embedding),
+		usage: {
+			inputTokens: data.usage?.prompt_tokens ?? 0,
+			outputTokens: 0, // embeddings have no output tokens
+		},
+	}
 }
 
 // ── Cosine Similarity ─────────────────────────────────────────────────
@@ -88,20 +98,27 @@ export async function evaluateTension(
 	positionEmbeddings: Float32Array[],
 	embeddingConfig: ModelRole,
 	signalWeights: Record<string, number>,
-): Promise<number> {
+): Promise<{ tension: number; embeddingCost: TokenUsage }> {
+	const zeroCost: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+
 	// Manual /run or owner correction — always trigger
 	if (signal.sourceMode === "command" || signal.sourceProvider === "correction") {
-		return 1.0
+		return { tension: 1.0, embeddingCost: zeroCost }
 	}
 
 	// First session — no positions yet, everything is novel
-	if (positionSlugs.length === 0) return 1.0
+	if (positionSlugs.length === 0) return { tension: 1.0, embeddingCost: zeroCost }
 
 	// Domain relevance gate — free, instant
-	if (!isDomainRelevant(signal, domain, positionSlugs)) return 0.0
+	if (!isDomainRelevant(signal, domain, positionSlugs)) {
+		return { tension: 0.0, embeddingCost: zeroCost }
+	}
 
 	// Embed signal
-	const signalEmbedding = await embed(signal.content, embeddingConfig)
+	const { embedding: signalEmbedding, usage: embeddingUsage } = await embed(
+		signal.content,
+		embeddingConfig,
+	)
 
 	// Find max similarity against existing positions
 	let maxSimilarity = 0
@@ -114,5 +131,5 @@ export async function evaluateTension(
 	const sourceWeight = signalWeights[signal.sourceProvider] ?? 1.0
 	const tension = (1 - maxSimilarity) * sourceWeight
 
-	return tension
+	return { tension, embeddingCost: embeddingUsage }
 }

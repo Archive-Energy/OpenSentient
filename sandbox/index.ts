@@ -1,13 +1,13 @@
 import { Daytona } from "@daytonaio/sdk"
 import { SandboxAgent } from "sandbox-agent"
-import { resolveKey } from "../actor/inference"
-import { materialize } from "../actor/materialize"
+import { buildHarnessConfig, buildSandboxEnvVars } from "../actor/materialize"
 import type {
 	IngestSignal,
 	RepoConfig,
 	SentientState,
 	SessionSummary,
 	SkillSource,
+	TokenUsage,
 } from "../actor/types"
 
 // ── Daytona Sandbox Lifecycle ─────────────────────────────────────────
@@ -52,9 +52,7 @@ async function createFreshSandbox(
 	daytona: Daytona,
 	state: SentientState,
 ): Promise<Awaited<ReturnType<Daytona["create"]>>> {
-	const { sandboxEnvVars } = materialize(
-		state.cachedAgentsMdBody ? `---\n---\n${state.cachedAgentsMdBody}` : "---\n---\n",
-	)
+	const sandboxEnvVars = buildSandboxEnvVars(state.modelConfig.sandbox)
 
 	const sandbox = await daytona.create({
 		snapshot: "sandbox-agent-ready",
@@ -94,10 +92,10 @@ export async function mountWorkspace(sdk: SandboxAgent, state: SentientState): P
 	}
 
 	// Generate harness config
-	const agentsMdRaw = state.cachedAgentsMdBody
-		? `---\n---\n${state.cachedAgentsMdBody}`
-		: "---\n---\n"
-	const { harnessConfig } = materialize(agentsMdRaw)
+	const harnessConfig = buildHarnessConfig(
+		state.modelConfig.sandbox.harness,
+		state.cachedAgentsMdBody ?? "",
+	)
 	if (harnessConfig) {
 		const dir = harnessConfig.filename.includes("/")
 			? `/workspace/${harnessConfig.filename.split("/").slice(0, -1).join("/")}`
@@ -135,7 +133,8 @@ export async function mountWorkspace(sdk: SandboxAgent, state: SentientState): P
 // ── Clone Repos ───────────────────────────────────────────────────────
 
 async function cloneRepo(sdk: SandboxAgent, repo: RepoConfig): Promise<void> {
-	const token = resolveKey(repo.auth)
+	const token = process.env.GITHUB_TOKEN
+	if (!token) throw new Error("Missing env var: GITHUB_TOKEN (required for repo cloning)")
 	const urlWithAuth = repo.url.replace("https://", `https://${token}@`)
 	const repoName = repo.url.split("/").slice(-1)[0].replace(".git", "")
 
@@ -183,11 +182,19 @@ export async function runSession(
 
 	// Inject context — knowledge graph state + trigger
 	const contextInjection = buildContextInjection(state, trigger)
-	await session.prompt([{ type: "text", text: contextInjection }])
+	const contextResponse = await session.prompt([{ type: "text", text: contextInjection }])
 
 	// Run the session — agent applies Alethic Method
 	const sessionPrompt = buildSessionPrompt(trigger)
-	const result = await session.prompt([{ type: "text", text: sessionPrompt }])
+	const sessionResponse = await session.prompt([{ type: "text", text: sessionPrompt }])
+
+	// Aggregate token usage from both prompt calls (ACP experimental)
+	const tokenUsage: TokenUsage = {
+		inputTokens:
+			(contextResponse.usage?.inputTokens ?? 0) + (sessionResponse.usage?.inputTokens ?? 0),
+		outputTokens:
+			(contextResponse.usage?.outputTokens ?? 0) + (sessionResponse.usage?.outputTokens ?? 0),
+	}
 
 	// Read session output
 	const outputBytes = await sdk.readFsFile({ path: "/workspace/output/session-summary.json" })
@@ -200,6 +207,11 @@ export async function runSession(
 	summary.completedAt = summary.completedAt || Date.now()
 	summary.triggerSignalId = trigger.id
 	summary.artifacts = summary.artifacts || { pullRequests: [] }
+
+	// Attach token usage if available
+	if (tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0) {
+		summary.tokenUsage = tokenUsage
+	}
 
 	await sdk.destroySession(session.id)
 

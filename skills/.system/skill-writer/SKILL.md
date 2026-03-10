@@ -4,6 +4,7 @@ description: Write new SKILL.md files from patterns observed in record sessions.
   Autonomous post-hoc extraction — not interactive generation. Produces
   API-deployable skills from session evidence without human in the loop.
   Also maintains skills/SKILLPACK.md — the living composition document.
+runtime: sandbox
 ---
 
 # Skill Writer

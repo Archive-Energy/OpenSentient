@@ -6,19 +6,21 @@
 	"scripts": {
 		"dev": "bun run --watch actor/index.ts",
 		"build": "bun build actor/index.ts --outdir dist --target bun",
-		"rebuild-index": "bun run actor/rebuild.ts",
+		"rebuild-index": "bun run cli/rebuild-index.ts",
 		"test": "bun test",
 		"check": "biome check .",
 		"format": "biome format --write ."
 	},
 	"dependencies": {
-		"rivetkit": "^2.1.6",
-		"@sandbox-agent/persist-rivet": "0.3.x",
-		"sandbox-agent": "0.3.x",
 		"@daytonaio/sdk": "latest",
-		"hono": "^4",
+		"@sandbox-agent/persist-rivet": "0.3.x",
 		"grammy": "^1",
-		"gray-matter": "^4"
+		"gray-matter": "^4",
+		"hono": "^4",
+		"jsonc-parser": "^3.3.1",
+		"rivetkit": "^2.1.6",
+		"sandbox-agent": "0.3.x",
+		"zod": "^4.3.6"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^1",

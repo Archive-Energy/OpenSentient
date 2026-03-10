@@ -4,6 +4,7 @@ description: Make sense of what a session revealed about the domain
   trajectory. Layer 4 of the Alethic Method — the retrospective layer.
   Apply at session end before writing the record node. Transforms
   individual position updates into domain understanding.
+runtime: sandbox
 ---
 
 # Sensemaking

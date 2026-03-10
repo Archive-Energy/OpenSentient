@@ -4,6 +4,7 @@ description: Add Telegram as a full interaction channel to this
   opensentient fork. Implements all three channel modes — conversation,
   command, and signal. Serves as the reference implementation that all
   other channel skills (add-slack, add-discord, add-whatsapp) follow.
+runtime: setup
 ---
 
 # Add Telegram Channel

@@ -1,22 +1,28 @@
 import { actor, event, queue, setup } from "rivetkit"
 import { Loop, workflow } from "rivetkit/workflow"
 import { ensureSandbox, mountWorkspace, runSession, teardownSession } from "../sandbox/index"
+import {
+	DEFAULT_BUDGET,
+	checkBudget,
+	estimateCostFromUsage,
+	getDailyDigest,
+	recordCost,
+	resetBudgetIfNewDay,
+} from "./budget"
 import { commitProof, drainSession, rejectProof, validateSummary } from "./drain"
-import { actorInfer } from "./inference"
-import { materialize, parseAgentsMd } from "./materialize"
+import { parseSentientConfig } from "./materialize"
+import { calculateCost, fetchModelPricing } from "./pricing"
 import { actorDb } from "./schema"
+import { runActorSkill } from "./skill-runner"
 import { evaluateTension } from "./tension"
 import type {
 	AgentCommand,
 	CalibrationEvent,
 	CalibrationState,
-	DEFAULT_CALIBRATION_THRESHOLD,
-	DEFAULT_THRESHOLD,
 	IngestSignal,
-	MIN_SESSION_GAP_MS,
-	SIGNAL_TTL_MS,
 	SentientState,
 	SessionSummary,
+	TriageResult,
 } from "./types"
 
 // ── Actor Definition ──────────────────────────────────────────────────
@@ -28,14 +34,13 @@ const opensentient = actor({
 		initialized: false,
 		domain: { name: "", description: "", boundaries: [], adjacencies: [] },
 		modelConfig: {
-			actor: { provider: "anthropic", key: "${ANTHROPIC_API_KEY}", name: "claude-haiku-4-5" },
+			actor: { provider: "anthropic", name: "claude-haiku-4-5" },
 			embedding: {
 				provider: "openrouter",
-				key: "${EMBEDDING_API_KEY}",
 				name: "baai/bge-m3",
 				dimensions: 1024,
 			},
-			sandbox: { name: "claude-opus-4-6", harness: "opencode", key: "" },
+			sandbox: { name: "claude-opus-4-6", harness: "opencode" },
 		},
 		repos: [],
 		tensionThreshold: 0.6,
@@ -48,6 +53,9 @@ const opensentient = actor({
 		telegramChatId: null,
 		dirty: true,
 		cachedAgentsMdBody: null,
+		budgetState: { ...DEFAULT_BUDGET },
+		triageEnabled: true,
+		modelPricingCache: null,
 	}),
 
 	events: {
@@ -91,30 +99,37 @@ const opensentient = actor({
 						credibility: 1.0,
 						timestamp: Date.now(),
 					}
-					await processSignal(loopCtx, signal)
+					await processSignal(loopCtx as unknown as ProcessContext, signal)
 				}
 				return // next loop iteration
 			}
 
 			// Process signal
 			const signal = message.body as IngestSignal
-			await processSignal(loopCtx, signal)
+			await processSignal(loopCtx as unknown as ProcessContext, signal)
 		})
 	}),
 
 	// ── Actions ─────────────────────────────────────────────────────────
 
 	actions: {
-		initialize: async (c, agentsMdRaw: string) => {
-			const { config, body } = parseAgentsMd(agentsMdRaw)
+		initialize: async (c, configJsonc: string, instructionsMd: string) => {
+			const config = parseSentientConfig(configJsonc)
 			c.state.initialized = true
 			c.state.domain = config.domain
 			c.state.modelConfig = config.models
 			c.state.repos = config.repos ?? []
 			c.state.tensionThreshold = config.session.threshold
 			c.state.calibrationThreshold = config.session.calibration_threshold
-			c.state.cachedAgentsMdBody = body
+			c.state.cachedAgentsMdBody = instructionsMd
 			c.state.dirty = false
+
+			// v0.2: Budget config
+			if (config.budget) {
+				c.state.budgetState.dailyBudgetUsd = config.budget.daily_usd
+				c.state.budgetState.x402AllocationPct = config.budget.x402_allocation_pct
+				c.state.triageEnabled = config.budget.triage_enabled ?? true
+			}
 
 			// Index seed positions
 			for (const seed of config.seed_positions ?? []) {
@@ -151,6 +166,13 @@ const opensentient = actor({
 					}
 				}
 			}
+
+			// v0.2: Fetch model pricing on init
+			try {
+				c.state.modelPricingCache = await fetchModelPricing(null)
+			} catch {
+				// Non-fatal — pricing cache will be null, costs estimated at 0
+			}
 		},
 
 		receiveSignal: async (c, signal: IngestSignal) => {
@@ -165,6 +187,22 @@ const opensentient = actor({
 		},
 
 		enqueueDailyScan: async (c) => {
+			// v0.2: Reset daily budget
+			const didReset = resetBudgetIfNewDay(c.state)
+			if (didReset) {
+				c.broadcast("calibrationEvent", {
+					type: "budgetReset",
+					dailyBudgetUsd: c.state.budgetState.dailyBudgetUsd,
+				})
+			}
+
+			// v0.2: Refresh pricing cache daily
+			try {
+				c.state.modelPricingCache = await fetchModelPricing(c.state.modelPricingCache)
+			} catch {
+				// Non-fatal
+			}
+
 			const signal: IngestSignal = {
 				id: `daily-scan-${Date.now()}`,
 				sourceProvider: "system",
@@ -283,39 +321,57 @@ const opensentient = actor({
 		setTelegramChatId: (c, chatId: number) => {
 			c.state.telegramChatId = chatId
 		},
+
+		getDailyDigest: (c) => getDailyDigest(c.state),
+
+		adjustBudget: (c, dailyUsd: number, x402Pct?: number) => {
+			c.state.budgetState.dailyBudgetUsd = dailyUsd
+			if (x402Pct !== undefined) {
+				c.state.budgetState.x402AllocationPct = x402Pct
+			}
+		},
 	},
 })
 
 // ── Signal Processing (used inside workflow) ──────────────────────────
 
-async function processSignal(
-	ctx: {
-		state: SentientState
-		db: typeof opensentient extends { db: infer D } ? D : never
-		broadcast: (event: string, payload: CalibrationEvent) => void
-		step: <T>(opts: {
-			name: string
-			timeout?: number
-			maxRetries?: number
-			retryBackoffBase?: number
-			run: () => T
-		}) => Promise<T>
-		rollbackCheckpoint: (name: string) => Promise<void>
-	},
-	signal: IngestSignal,
-): Promise<void> {
+// biome-ignore lint/suspicious/noExplicitAny: Rivet DB type is opaque, inferred at runtime
+type ActorDb = any
+
+type ProcessContext = {
+	state: SentientState
+	db: ActorDb
+	broadcast: (event: string, payload: CalibrationEvent) => void
+	step: <T>(opts: {
+		name: string
+		timeout?: number
+		maxRetries?: number
+		retryBackoffBase?: number
+		run: () => T
+	}) => Promise<T>
+	rollbackCheckpoint: (name: string) => Promise<void>
+}
+
+async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise<void> {
 	// TTL check
 	if (Date.now() - signal.timestamp > 7 * 24 * 60 * 60 * 1000) return
 
 	// Session cooldown
 	if (Date.now() - ctx.state.lastSessionAt < 60_000) return
 
+	// v0.2: Reset budget if new day
+	resetBudgetIfNewDay(ctx.state)
+
 	// Get position slugs for tension evaluation
-	const positions = (await ctx.db.execute("SELECT slug FROM positions")) as Array<{ slug: string }>
+	const positions = (await ctx.db.execute("SELECT slug FROM positions")) as Array<{
+		slug: string
+		confidence: number
+		text: string
+	}>
 	const positionSlugs = positions.map((p) => p.slug)
 
 	// Evaluate tension (domain relevance + embedding similarity)
-	const tension = await evaluateTension(
+	const { tension, embeddingCost } = await evaluateTension(
 		signal,
 		ctx.state.domain,
 		positionSlugs,
@@ -323,6 +379,23 @@ async function processSignal(
 		ctx.state.modelConfig.embedding,
 		ctx.state.signalWeights,
 	)
+
+	// v0.2: Record embedding cost
+	if (embeddingCost.inputTokens > 0 && ctx.state.modelPricingCache) {
+		const embCostUsd = calculateCost(
+			ctx.state.modelPricingCache,
+			ctx.state.modelConfig.embedding.provider ?? "openrouter",
+			ctx.state.modelConfig.embedding.name,
+			embeddingCost,
+		)
+		recordCost(ctx.state, {
+			type: "embedding",
+			costUsd: embCostUsd,
+			tokenUsage: embeddingCost,
+			timestamp: Date.now(),
+		})
+		await logCost(ctx.db, "embedding", embCostUsd, embeddingCost)
+	}
 
 	// Log signal
 	await ctx.db.execute(
@@ -338,6 +411,86 @@ async function processSignal(
 
 	// Below threshold — skip
 	if (tension < ctx.state.tensionThreshold) return
+
+	// v0.2: Triage gate — classify signal before committing to Sandbox
+	if (ctx.state.triageEnabled) {
+		// Budget check for triage call
+		if (!checkBudget(ctx.state, "triage")) {
+			ctx.broadcast("calibrationEvent", {
+				type: "budgetExhausted",
+				spentUsd: ctx.state.budgetState.spentTodayUsd,
+				dailyBudgetUsd: ctx.state.budgetState.dailyBudgetUsd,
+			})
+			return // Signal lost — queuing for tomorrow would require persistence
+		}
+
+		try {
+			const triageContext = {
+				signal: {
+					content: signal.content,
+					source: signal.sourceProvider,
+					urgency: signal.urgency,
+					credibility: signal.credibility,
+				},
+				positions: positions.slice(0, 5).map((p) => ({
+					slug: p.slug,
+					confidence: p.confidence,
+					text: (p.text ?? "").slice(0, 200),
+				})),
+				budgetRemaining: ctx.state.budgetState.dailyBudgetUsd - ctx.state.budgetState.spentTodayUsd,
+			}
+
+			const { result: triage, usage: triageUsage } = await runActorSkill<TriageResult>(
+				"signal-triage",
+				triageContext,
+				ctx.state.modelConfig.actor,
+			)
+
+			// Record triage cost
+			const pricingCache = ctx.state.modelPricingCache
+			const triageCostUsd = pricingCache
+				? calculateCost(
+						pricingCache,
+						ctx.state.modelConfig.actor.provider ?? "anthropic",
+						ctx.state.modelConfig.actor.name,
+						triageUsage,
+					)
+				: 0
+			recordCost(ctx.state, {
+				type: "triage",
+				costUsd: triageCostUsd,
+				tokenUsage: triageUsage,
+				timestamp: Date.now(),
+			})
+			await logCost(ctx.db, "triage", triageCostUsd, triageUsage)
+
+			ctx.broadcast("calibrationEvent", {
+				type: "triageComplete",
+				action: triage.action,
+				slug: triage.positions[0] ?? signal.id,
+			})
+
+			// CONFIRM / UPDATE — Actor handles directly, no Sandbox needed
+			if (triage.action === "confirm" || triage.action === "update") {
+				await handleActorTriage(ctx, triage)
+				return
+			}
+
+			// CONTRADICT / NEW_TERRITORY — falls through to Sandbox session
+		} catch {
+			// Triage failed — fall through to Sandbox session as fallback
+		}
+	}
+
+	// v0.2: Budget check for full Sandbox session
+	if (!checkBudget(ctx.state, "session")) {
+		ctx.broadcast("calibrationEvent", {
+			type: "budgetExhausted",
+			spentUsd: ctx.state.budgetState.spentTodayUsd,
+			dailyBudgetUsd: ctx.state.budgetState.dailyBudgetUsd,
+		})
+		return
+	}
 
 	// Broadcast session start
 	ctx.broadcast("calibrationEvent", {
@@ -384,10 +537,30 @@ async function processSignal(
 		}
 
 		// Drain session
-		const drainResult = await ctx.step({
+		await ctx.step({
 			name: "drain-session",
 			run: () => drainSession({ db: ctx.db, state: ctx.state, broadcast: ctx.broadcast }, summary),
 		})
+
+		// v0.2: Record session cost from sandbox token usage
+		if (summary.tokenUsage && ctx.state.modelPricingCache) {
+			const sessionCostUsd = calculateCost(
+				ctx.state.modelPricingCache,
+				"anthropic", // Sandbox provider — inferred from harness
+				ctx.state.modelConfig.sandbox.name,
+				summary.tokenUsage,
+			)
+			recordCost(ctx.state, {
+				type: "session",
+				costUsd: sessionCostUsd,
+				tokenUsage: summary.tokenUsage,
+				timestamp: Date.now(),
+			})
+			await logCost(ctx.db, "session", sessionCostUsd, summary.tokenUsage)
+		} else {
+			// No usage data — record session with zero cost (estimation deferred to cost-calibration)
+			recordCost(ctx.state, { type: "session", costUsd: 0, timestamp: Date.now() })
+		}
 
 		// Update last session timestamp
 		ctx.state.lastSessionAt = Date.now()
@@ -407,6 +580,55 @@ async function processSignal(
 			retryable: true,
 		})
 	}
+}
+
+// ── Actor Triage Handlers (CONFIRM / UPDATE) ──────────────────────────
+
+async function handleActorTriage(ctx: ProcessContext, triage: TriageResult): Promise<void> {
+	for (const slug of triage.positions) {
+		if (triage.action === "confirm" && triage.confidenceNudge !== undefined) {
+			// Small confidence adjustment — no deep analysis needed
+			await ctx.db.execute(
+				`UPDATE positions
+				 SET confidence = MIN(1.0, MAX(0.0, confidence + ?)),
+				     updated_at = datetime('now')
+				 WHERE slug = ?`,
+				triage.confidenceNudge,
+				slug,
+			)
+		} else if (triage.action === "update" && triage.newText) {
+			// Minor factual update — Actor handles directly
+			await ctx.db.execute(
+				`UPDATE positions
+				 SET text = ?,
+				     confidence = MIN(1.0, MAX(0.0, confidence + ?)),
+				     updated_at = datetime('now')
+				 WHERE slug = ?`,
+				triage.newText,
+				triage.confidenceNudge ?? 0,
+				slug,
+			)
+		}
+	}
+}
+
+// ── Cost Logging (to SQLite) ──────────────────────────────────────────
+
+async function logCost(
+	db: ProcessContext["db"],
+	type: string,
+	costUsd: number,
+	usage?: { inputTokens: number; outputTokens: number },
+): Promise<void> {
+	await db.execute(
+		"INSERT INTO cost_log (id, type, cost_usd, input_tokens, output_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		`cost-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+		type,
+		costUsd,
+		usage?.inputTokens ?? 0,
+		usage?.outputTokens ?? 0,
+		Date.now(),
+	)
 }
 
 // ── Registry ──────────────────────────────────────────────────────────

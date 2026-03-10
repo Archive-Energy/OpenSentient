@@ -1,19 +1,23 @@
-import matter from "gray-matter"
-import { resolveKey } from "./inference"
+import { type ParseError, parse } from "jsonc-parser"
 import type { AgentsConfig, HarnessBackend, SandboxModelConfig } from "./types"
+import { SentientConfigSchema } from "./types"
 
-// ── AGENTS.md Parsing ─────────────────────────────────────────────────
+// ── sentient.jsonc Parsing ────────────────────────────────────────────
 
-export function parseAgentsMd(raw: string): { config: AgentsConfig; body: string } {
-	const { data, content } = matter(raw)
-	return { config: data as AgentsConfig, body: content.trim() }
+export function parseSentientConfig(raw: string): AgentsConfig {
+	const errors: ParseError[] = []
+	const data = parse(raw, errors)
+	if (errors.length > 0) {
+		throw new Error(`JSONC parse error at offset ${errors[0].offset}: ${errors[0].error}`)
+	}
+	return SentientConfigSchema.parse(data)
 }
 
 // ── Harness Config File Generation ────────────────────────────────────
 
 export function buildHarnessConfig(
 	harness: HarnessBackend,
-	agentsMdBody: string,
+	instructionsMd: string,
 ): { filename: string; content: string } | null {
 	switch (harness) {
 		case "opencode":
@@ -32,7 +36,7 @@ export function buildHarnessConfig(
 			return {
 				filename: "CLAUDE.md",
 				content: [
-					agentsMdBody,
+					instructionsMd,
 					"",
 					"## Working Directory",
 					"All knowledge files are in /workspace/knowledge/",
@@ -45,7 +49,7 @@ export function buildHarnessConfig(
 		case "amp":
 			return {
 				filename: ".amp/config.json",
-				content: JSON.stringify({ instructions: agentsMdBody }, null, 2),
+				content: JSON.stringify({ instructions: instructionsMd }, null, 2),
 			}
 		case "codex":
 			// Codex reads AGENTS.md natively
@@ -78,19 +82,4 @@ export function buildSandboxEnvVars(sandboxConfig: SandboxModelConfig): Record<s
 	if (process.env.EXA_API_KEY) envVars.EXA_API_KEY = process.env.EXA_API_KEY
 
 	return envVars
-}
-
-// ── Materialize Full Context ──────────────────────────────────────────
-
-export function materialize(agentsMdRaw: string) {
-	const { config, body } = parseAgentsMd(agentsMdRaw)
-	const harnessConfig = buildHarnessConfig(config.models.sandbox.harness, body)
-	const sandboxEnvVars = buildSandboxEnvVars(config.models.sandbox)
-
-	return {
-		config,
-		body,
-		harnessConfig,
-		sandboxEnvVars,
-	}
 }

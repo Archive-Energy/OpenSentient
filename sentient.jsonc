@@ -1,0 +1,100 @@
+{
+	// ── Identity ──────────────────────────────────────────────────────
+	"name": "my-agent",
+
+	// ── Domain ────────────────────────────────────────────────────────
+	"domain": {
+		"name": "my-domain",
+		"description": "Full description of what this agent is responsible for.\nWrite clearly — this drives signal evaluation and session context.",
+		"boundaries": ["specific area 1", "specific area 2"],
+		"adjacencies": ["neighboring domain 1"]
+	},
+
+	// ── Models ────────────────────────────────────────────────────────
+	// API keys live in .env, resolved by provider name automatically.
+	//   anthropic  → ANTHROPIC_API_KEY
+	//   openrouter → OPENROUTER_API_KEY
+	//   openai     → OPENAI_API_KEY
+	// Sandbox uses the same provider keys (forwarded to sandbox env).
+	"models": {
+		"actor": {
+			"provider": "anthropic",
+			"name": "claude-haiku-4-5"
+		},
+		"embedding": {
+			"provider": "openrouter",
+			"name": "baai/bge-m3",
+			"dimensions": 1024
+		},
+		"sandbox": {
+			"harness": "opencode",
+			"name": "claude-opus-4-6"
+		}
+	},
+
+	// ── Session Behavior ──────────────────────────────────────────────
+	"session": {
+		"threshold": 0.6,
+		"calibration_threshold": 0.4,
+		"daily_scan": true,
+		"scan_interval_hours": 24,
+		"session_cooldown_minutes": 1,
+		"signal_ttl_days": 7
+	},
+
+	// ── Signals ───────────────────────────────────────────────────────
+	"signals": {
+		"parallel": { "weight": 1.0 },
+		"telegram": { "weight": 1.0 },
+		"scheduled": { "weight": 0.6 }
+	},
+
+	// ── Skills ────────────────────────────────────────────────────────
+	"skills": {
+		"curated": [],
+		"system_external": [
+			{ "type": "github", "source": "rivet-dev/skills", "skills": ["sandbox-agent"] },
+			{ "type": "github", "source": "kepano/obsidian-skills", "skills": ["defuddle"] }
+		]
+	},
+
+	// ── Integrations ──────────────────────────────────────────────────
+	// Tokens/keys live in .env, not here.
+	"integrations": {
+		"telegram": true
+	},
+
+	// ── API ───────────────────────────────────────────────────────────
+	"api": {
+		"discovery": true,
+		"public_skills": true,
+		"public_positions": false,
+		"public_inquiries": false
+	},
+
+	// ── Budget ────────────────────────────────────────────────────────
+	// "budget": {
+	//   "daily_usd": 5.00,
+	//   "x402_allocation_pct": 10
+	// },
+
+	// ── Payments (x402) ───────────────────────────────────────────────
+	// "payments": {
+	//   "enabled": true,
+	//   "pricing": {
+	//     "query": "0.10",
+	//     "position_history": "0.05",
+	//     "export": "1.00"
+	//   }
+	// },
+
+	// ── Registry ──────────────────────────────────────────────────────
+	// "registry": {
+	//   "url": "https://os.archive.energy"
+	// },
+
+	// ── Seed State ────────────────────────────────────────────────────
+	"seed_positions": [
+		{ "slug": "initial-position", "text": "Initial position about the domain", "confidence": 0.8 }
+	]
+}

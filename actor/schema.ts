@@ -94,5 +94,23 @@ export const actorDb = db({
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `)
+
+		await database.execute(`
+      CREATE TABLE IF NOT EXISTS cost_log (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL, -- triage | scan | session | embedding | x402_purchase
+        cost_usd REAL NOT NULL DEFAULT 0.0,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        model TEXT,
+        provider TEXT,
+        created_at INTEGER NOT NULL -- epoch ms
+      )
+    `)
+
+		await database.execute(`
+      CREATE INDEX IF NOT EXISTS idx_cost_log_created
+        ON cost_log (created_at DESC)
+    `)
 	},
 })

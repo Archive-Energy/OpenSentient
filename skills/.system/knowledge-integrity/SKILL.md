@@ -7,6 +7,7 @@ description: Structural health check for the knowledge graph. Audits
   Covers the gap between validate-config (boot) and calibration-review
   (drift) — this skill checks whether the graph is structurally sound
   right now.
+runtime: actor
 ---
 
 # Knowledge Integrity

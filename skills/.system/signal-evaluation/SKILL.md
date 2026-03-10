@@ -4,6 +4,7 @@ description: Evaluate incoming signals for credibility, corroboration,
   and relevance before updating any position. Layer 1 of the Alethic
   Method — the investigative layer. Apply to every IngestSignal before
   tension evaluation. A signal is not evidence until it passes this layer.
+runtime: actor
 ---
 
 # Signal Evaluation
@@ -31,6 +32,16 @@ signal_credibility_score (0-1)
 corroboration_count
 contradicting_signals[]
 recommended_tension_weight
+
+## x402-Acquired Signals (v0.2)
+Signals purchased from other Sentients via x402 get different
+credibility weighting:
+- Check x402Source field on the signal
+- Weight by the source Sentient's calibration acceptance rate
+- A Sentient with 95% accept rate → credibility multiplier ~0.95
+- A Sentient with 60% accept rate → credibility multiplier ~0.60
+- Never trust below 0.5 accept rate (blocked by knowledge-acquisition)
+- x402 signals carry citation metadata — factor into corroboration
 
 ## Alethic Role
 Determines whether a signal can uncover something real or is
