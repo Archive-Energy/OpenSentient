@@ -6,7 +6,6 @@ import type {
 	RepoConfig,
 	SentientState,
 	SessionSummary,
-	SkillSource,
 	TokenUsage,
 } from "../actor/types"
 
@@ -122,11 +121,6 @@ export async function mountWorkspace(sdk: SandboxAgent, state: SentientState): P
 		for (const repo of state.repos) {
 			await cloneRepo(sdk, repo)
 		}
-	}
-
-	// Mount Parse MCP if configured
-	if (process.env.PARSE_API_KEY) {
-		// Parse MCP server would be configured via session init mcpServers
 	}
 }
 

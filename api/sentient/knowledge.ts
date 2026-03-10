@@ -1,5 +1,4 @@
 import { readdir } from "node:fs/promises"
-import matter from "gray-matter"
 import type { Context } from "hono"
 
 export async function handleKnowledge(c: Context) {
@@ -26,18 +25,6 @@ export async function handleKnowledge(c: Context) {
 
 	try {
 		const file = await Bun.file(filePath).text()
-
-		// Check per-node public override
-		try {
-			const { data: frontmatter } = matter(file)
-			if (!isSkills && !frontmatter.public) {
-				// Auth already checked by middleware for non-public routes
-				// This is for fine-grained per-node control
-			}
-		} catch {
-			// No frontmatter — serve as-is
-		}
-
 		return c.text(file, 200, { "Content-Type": "text/markdown" })
 	} catch {
 		return c.text("Not found", 404)

@@ -1,20 +1,8 @@
 import type { Context } from "hono"
-import type { IngestSignal } from "../../actor/types"
-
-interface ActorHandle {
-	receiveSignal: (signal: IngestSignal) => Promise<void>
-	runNow: (reason?: string) => Promise<void>
-	correctPosition: (slug: string, text: string, confidence: number) => Promise<void>
-	adjustThreshold: (value: number) => Promise<void>
-	adjustSignalWeight: (source: string, weight: number) => Promise<void>
-}
-
-let actorRef: ActorHandle | null = null
-export function setActorRef(ref: ActorHandle) {
-	actorRef = ref
-}
+import { getActorRef } from "./actor-ref"
 
 export async function handlePost(c: Context, route: string) {
+	const actorRef = getActorRef()
 	if (!actorRef) return c.json({ error: "Actor not initialized" }, 503)
 
 	switch (route) {
@@ -52,7 +40,6 @@ export async function handlePost(c: Context, route: string) {
 
 		case "config": {
 			const body = await c.req.json()
-			// Update model config, thresholds, etc.
 			if (body.threshold !== undefined) {
 				await actorRef.adjustThreshold(body.threshold)
 			}

@@ -24,13 +24,6 @@ export interface InferenceResult {
 	usage: TokenUsage
 }
 
-// ── Constants ─────────────────────────────────────────────────────────
-
-export const SIGNAL_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
-export const MIN_SESSION_GAP_MS = 60_000 // 1 minute
-export const DEFAULT_THRESHOLD = 0.6
-export const DEFAULT_CALIBRATION_THRESHOLD = 0.4
-
 // ── Domain ────────────────────────────────────────────────────────────
 
 export interface Domain {
@@ -266,28 +259,6 @@ export interface SkillMeta {
 	escalate_to?: SkillRuntime
 	trigger?: string
 	layer?: string
-}
-
-// ── Skill Config ──────────────────────────────────────────────────────
-
-export interface SkillSource {
-	type: "github" | "local" | "git"
-	source: string
-	skills?: string[]
-	ref?: string
-	subpath?: string
-}
-
-export interface SkillsConfig {
-	curated: SkillSource[]
-	system_external: SkillSource[]
-}
-
-// ── Integrations ──────────────────────────────────────────────────────
-
-export interface IntegrationsConfig {
-	parse?: boolean
-	telegram: boolean
 }
 
 // ── Sentient Config Schema (Zod) ──────────────────────────────────────

@@ -1,17 +1,17 @@
 import { actor, event, queue, setup } from "rivetkit"
-import { Loop, workflow } from "rivetkit/workflow"
+import { workflow } from "rivetkit/workflow"
 import { ensureSandbox, mountWorkspace, runSession, teardownSession } from "../sandbox/index"
 import {
 	DEFAULT_BUDGET,
+	calculateCost,
 	checkBudget,
-	estimateCostFromUsage,
+	fetchModelPricing,
 	getDailyDigest,
 	recordCost,
 	resetBudgetIfNewDay,
 } from "./budget"
 import { commitProof, drainSession, rejectProof, validateSummary } from "./drain"
 import { parseSentientConfig } from "./materialize"
-import { calculateCost, fetchModelPricing } from "./pricing"
 import { actorDb } from "./schema"
 import { runActorSkill } from "./skill-runner"
 import { evaluateTension } from "./tension"

@@ -1,18 +1,9 @@
 import type { Context } from "hono"
-import type { CalibrationState, PositionProofOfWork } from "../../actor/types"
-
-// Actor handle — minimal interface covering what routes call
-interface ActorHandle {
-	getStatus: () => Promise<Record<string, unknown>>
-	getCalibrationState: () => Promise<CalibrationState>
-}
-
-let actorRef: ActorHandle | null = null
-export function setActorRef(ref: ActorHandle) {
-	actorRef = ref
-}
+import type { PositionProofOfWork } from "../../actor/types"
+import { getActorRef } from "./actor-ref"
 
 export async function handleGet(c: Context, route: string) {
+	const actorRef = getActorRef()
 	if (!actorRef) return c.json({ error: "Actor not initialized" }, 503)
 
 	switch (route) {
@@ -22,7 +13,6 @@ export async function handleGet(c: Context, route: string) {
 		}
 
 		case "frontier": {
-			// Materialized session context — INDEX + top tensions + active inquiries
 			try {
 				const indexMd = await Bun.file("knowledge/INDEX.md").text()
 				const calibration = await actorRef.getCalibrationState()

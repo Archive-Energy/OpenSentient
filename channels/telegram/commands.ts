@@ -1,4 +1,4 @@
-import type { Bot, Context } from "grammy"
+import type { Bot } from "grammy"
 import { registry } from "../../actor/index"
 
 // Pending adjust: chatId -> slug (waiting for confidence value)
@@ -177,10 +177,6 @@ export function registerCommands(bot: Bot): void {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
-
-function resolveSlugOrIndex(ctx: Context, actor: ReturnType<typeof registry.get>): string | null {
-	return resolveSlugOrIndexFromParts(ctx.match as string, actor)
-}
 
 function resolveSlugOrIndexFromParts(
 	input: string | undefined,

@@ -1,6 +1,6 @@
 import matter from "gray-matter"
 import { actorInfer } from "./inference"
-import type { InferenceResult, ModelRole, SkillMeta, TokenUsage } from "./types"
+import type { ModelRole, SkillMeta, TokenUsage } from "./types"
 
 // ── Skill Loading ─────────────────────────────────────────────────────
 

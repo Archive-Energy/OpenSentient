@@ -103,28 +103,42 @@ export function recordCost(state: SentientState, record: CostRecord): void {
 	}
 }
 
-// ── Cost Estimation ───────────────────────────────────────────────────
+// ── Pricing (models.dev) ──────────────────────────────────────────────
 
-/** Estimate cost from token usage using models.dev pricing cache. */
-export function estimateCostFromUsage(
-	usage: TokenUsage,
+const MODELS_DEV_URL = "https://models.dev/api.json"
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+
+export async function fetchModelPricing(
+	existingCache: ModelPricingCache | null,
+): Promise<ModelPricingCache> {
+	if (existingCache && Date.now() - existingCache.fetchedAt < CACHE_TTL_MS) {
+		return existingCache
+	}
+
+	const res = await fetch(MODELS_DEV_URL)
+	if (!res.ok) {
+		if (existingCache) return existingCache
+		throw new Error(`Failed to fetch model pricing: ${res.status}`)
+	}
+
+	const data = (await res.json()) as ModelPricingCache["data"]
+	return { data, fetchedAt: Date.now() }
+}
+
+export function calculateCost(
+	cache: ModelPricingCache,
 	provider: string,
 	model: string,
-	pricingCache: ModelPricingCache | null,
+	usage: TokenUsage,
 ): number {
-	if (!pricingCache) return 0
-
-	const providerData = pricingCache.data[provider]
+	const providerData = cache.data[provider]
 	if (!providerData) return 0
-
 	const modelData = providerData.models[model]
-	if (!modelData) return 0
-
-	// models.dev costs are $/Mtok
-	const inputCost = (usage.inputTokens * modelData.cost.input) / 1_000_000
-	const outputCost = (usage.outputTokens * modelData.cost.output) / 1_000_000
-
-	return inputCost + outputCost
+	if (!modelData?.cost) return 0
+	return (
+		(usage.inputTokens * modelData.cost.input + usage.outputTokens * modelData.cost.output) /
+		1_000_000
+	)
 }
 
 // ── Daily Digest ──────────────────────────────────────────────────────

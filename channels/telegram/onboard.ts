@@ -1,4 +1,4 @@
-import type { Bot, Context } from "grammy"
+import type { Bot } from "grammy"
 import { registry } from "../../actor/index"
 
 // ── Onboarding State ──────────────────────────────────────────────────
