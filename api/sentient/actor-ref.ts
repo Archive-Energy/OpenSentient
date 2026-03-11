@@ -1,4 +1,4 @@
-import type { CalibrationState, IngestSignal } from "../../actor/types"
+import type { CalibrationState, DatasetConfig, IngestSignal } from "../../actor/types"
 
 export interface ActorHandle {
 	getStatus: () => Promise<Record<string, unknown>>
@@ -12,6 +12,7 @@ export interface ActorHandle {
 	rejectProof: (slug: string, note: string) => Promise<void>
 	adjustThreshold: (value: number) => Promise<void>
 	adjustSignalWeight: (source: string, weight: number) => Promise<void>
+	ingestDataset: (config: DatasetConfig) => Promise<void>
 }
 
 let actorRef: ActorHandle | null = null

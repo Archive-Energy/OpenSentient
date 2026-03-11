@@ -93,6 +93,19 @@
 	//   "url": "https://os.archive.energy"
 	// },
 
+	// ── Datasets ─────────────────────────────────────────────────────
+	// Structured data ingestion. The sandbox agent loads, parses, and
+	// transforms data from any source — install what it needs at runtime.
+	// "datasets": [
+	//   { "source": "csv", "uri": "knowledge/seed-data.csv",
+	//     "mode": "positions", "content_column": "claim",
+	//     "label_column": "confidence", "schedule": "init" },
+	//   { "source": "url", "uri": "https://api.example.com/data.json",
+	//     "mode": "signals", "limit": 100, "schedule": "daily" },
+	//   { "source": "huggingface", "uri": "user/domain-data",
+	//     "mode": "signals", "limit": 500, "credibility": 0.7 }
+	// ],
+
 	// ── Seed State ────────────────────────────────────────────────────
 	"seed_positions": [
 		{ "slug": "initial-position", "text": "Initial position about the domain", "confidence": 0.8 }

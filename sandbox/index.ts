@@ -2,6 +2,8 @@ import { Daytona } from "@daytonaio/sdk"
 import { SandboxAgent } from "sandbox-agent"
 import { buildHarnessConfig, buildSandboxEnvVars } from "../actor/materialize"
 import type {
+	DatasetConfig,
+	DatasetOutput,
 	IngestSignal,
 	RepoConfig,
 	SentientState,
@@ -27,8 +29,8 @@ export async function ensureSandbox(
 				sandbox = await createFreshSandbox(daytona, state)
 				state.sandboxId = sandbox.id
 			}
-		} catch {
-			// Sandbox not found — create fresh
+		} catch (err) {
+			console.warn(`[sandbox] Failed to retrieve sandbox ${state.sandboxId}, creating fresh:`, err)
 			sandbox = await createFreshSandbox(daytona, state)
 			state.sandboxId = sandbox.id
 		}
@@ -196,7 +198,7 @@ export async function runSession(
 	const summary = JSON.parse(outputText) as SessionSummary
 
 	// Ensure required fields
-	summary.id = summary.id || `session-${Date.now()}`
+	summary.id = summary.id || `session-${crypto.randomUUID()}`
 	summary.startedAt = summary.startedAt || Date.now() - 60_000
 	summary.completedAt = summary.completedAt || Date.now()
 	summary.triggerSignalId = trigger.id
@@ -212,14 +214,78 @@ export async function runSession(
 	return summary
 }
 
-// ── Teardown Session ──────────────────────────────────────────────────
+// ── Dataset Session ───────────────────────────────────────────────────
 
-export async function teardownSession(sdk: SandboxAgent, sessionId: string): Promise<void> {
-	try {
-		await sdk.destroySession(sessionId)
-	} catch {
-		// Session may already be destroyed
-	}
+export async function runDatasetSession(
+	sdk: SandboxAgent,
+	state: SentientState,
+	config: DatasetConfig,
+): Promise<DatasetOutput> {
+	const harness = state.modelConfig.sandbox.harness
+	const model = state.modelConfig.sandbox.name
+
+	// Write dataset request config for the agent to read
+	await sdk.mkdirFs({ path: "/workspace/output" })
+	await sdk.writeFsFile(
+		{ path: "/workspace/output/dataset-request.json" },
+		JSON.stringify(config, null, 2),
+	)
+
+	// Create agent session
+	const session = await sdk.createSession({
+		agent: harness === "opencode" ? "opencode" : harness,
+		model,
+		sessionInit: {
+			cwd: "/workspace",
+			mcpServers: [],
+		},
+	})
+
+	// Build ingest prompt from the skill contract
+	const prompt = buildDatasetPrompt(config)
+	await session.prompt([{ type: "text", text: prompt }])
+
+	// Determine output file based on mode
+	const outputFile =
+		config.mode === "signals"
+			? "/workspace/output/dataset-signals.json"
+			: "/workspace/output/dataset-positions.json"
+
+	// Read output
+	const outputBytes = await sdk.readFsFile({ path: outputFile })
+	const outputText = new TextDecoder().decode(outputBytes)
+	const output = JSON.parse(outputText) as DatasetOutput
+
+	await sdk.destroySession(session.id)
+
+	return output
+}
+
+function buildDatasetPrompt(config: DatasetConfig): string {
+	const modeInstructions =
+		config.mode === "signals"
+			? `Write output to /workspace/output/dataset-signals.json with schema: { "source": "<source>:<uri>", "rowsProcessed": <n>, "signals": [{ "id": "dataset-<uuid>", "sourceProvider": "dataset", "sourceMode": "batch", "content": "<text>", "urgency": "medium", "credibility": ${config.credibility ?? 0.5}, "timestamp": <epoch_ms>, "metadata": {} }] }`
+			: `Write output to /workspace/output/dataset-positions.json with schema: { "source": "<source>:<uri>", "rowsProcessed": <n>, "positions": [{ "slug": "<slug>", "text": "<text>", "confidence": ${config.credibility ?? 0.5}, "surpriseDelta": 0, "priorConfidence": 0, "status": "settled" }] }`
+
+	return [
+		"# Dataset Ingestion Task",
+		"",
+		"Read the dataset request at /workspace/output/dataset-request.json.",
+		"Read the ingest-dataset skill at /workspace/skills/.system/ingest-dataset/SKILL.md for full instructions.",
+		"",
+		`Source: ${config.source}`,
+		`URI: ${config.uri}`,
+		`Mode: ${config.mode}`,
+		`Limit: ${config.limit ?? 1000} rows`,
+		config.content_column ? `Content column: ${config.content_column}` : "",
+		config.label_column ? `Label column: ${config.label_column}` : "",
+		"",
+		"Install any dependencies you need (pip, npm, etc). Parse the data and transform it.",
+		"",
+		modeInstructions,
+	]
+		.filter(Boolean)
+		.join("\n")
 }
 
 // ── Context Building ──────────────────────────────────────────────────

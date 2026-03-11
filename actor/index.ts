@@ -1,6 +1,6 @@
 import { actor, event, queue, setup } from "rivetkit"
 import { workflow } from "rivetkit/workflow"
-import { ensureSandbox, mountWorkspace, runSession, teardownSession } from "../sandbox/index"
+import { ensureSandbox, mountWorkspace, runDatasetSession, runSession } from "../sandbox/index"
 import {
 	DEFAULT_BUDGET,
 	calculateCost,
@@ -19,6 +19,8 @@ import type {
 	AgentCommand,
 	CalibrationEvent,
 	CalibrationState,
+	DatasetConfig,
+	DatasetOutput,
 	IngestSignal,
 	SentientState,
 	SessionSummary,
@@ -91,7 +93,7 @@ const opensentient = actor({
 				if (cmd.type === "run") {
 					// Manual run — create a synthetic signal
 					const signal: IngestSignal = {
-						id: `manual-${Date.now()}`,
+						id: `manual-${crypto.randomUUID()}`,
 						sourceProvider: "owner",
 						sourceMode: "command",
 						content: (cmd.payload.reason as string) ?? "Manual session triggered",
@@ -100,6 +102,11 @@ const opensentient = actor({
 						timestamp: Date.now(),
 					}
 					await processSignal(loopCtx as unknown as ProcessContext, signal)
+				} else if (cmd.type === "ingest_dataset") {
+					await processDatasetIngestion(
+						loopCtx as unknown as ProcessContext,
+						cmd.payload.dataset as DatasetConfig,
+					)
 				}
 				return // next loop iteration
 			}
@@ -170,8 +177,18 @@ const opensentient = actor({
 			// v0.2: Fetch model pricing on init
 			try {
 				c.state.modelPricingCache = await fetchModelPricing(null)
-			} catch {
-				// Non-fatal — pricing cache will be null, costs estimated at 0
+			} catch (err) {
+				console.warn("[init] Failed to fetch model pricing:", err)
+			}
+
+			// Enqueue init-scheduled dataset ingestions
+			for (const ds of config.datasets ?? []) {
+				if (ds.schedule === "init") {
+					await c.queue.send("commands", {
+						type: "ingest_dataset",
+						payload: { dataset: ds },
+					})
+				}
 			}
 		},
 
@@ -199,12 +216,12 @@ const opensentient = actor({
 			// v0.2: Refresh pricing cache daily
 			try {
 				c.state.modelPricingCache = await fetchModelPricing(c.state.modelPricingCache)
-			} catch {
-				// Non-fatal
+			} catch (err) {
+				console.warn("[daily] Failed to refresh model pricing:", err)
 			}
 
 			const signal: IngestSignal = {
-				id: `daily-scan-${Date.now()}`,
+				id: `daily-scan-${crypto.randomUUID()}`,
 				sourceProvider: "system",
 				sourceMode: "poll",
 				content: "Scheduled daily domain scan",
@@ -258,7 +275,7 @@ const opensentient = actor({
 			)
 			// Enqueue a signal to investigate this tension
 			const signal: IngestSignal = {
-				id: `tension-confirmed-${slug}-${Date.now()}`,
+				id: `tension-confirmed-${slug}-${crypto.randomUUID()}`,
 				sourceProvider: "owner",
 				sourceMode: "command",
 				content: `Owner confirmed tension on position: ${slug}. Investigate.`,
@@ -286,7 +303,7 @@ const opensentient = actor({
 			// Write calibration log
 			await c.db.execute(
 				"INSERT INTO calibration (id, type, slug, detail) VALUES (?, 'tension_dismissed', ?, ?)",
-				`dismiss-${slug}-${Date.now()}`,
+				`dismiss-${slug}-${crypto.randomUUID()}`,
 				slug,
 				JSON.stringify({ weightAdjustment: weightAdj }),
 			)
@@ -303,7 +320,7 @@ const opensentient = actor({
 			// Write correction as calibration log
 			await c.db.execute(
 				"INSERT INTO calibration (id, type, slug, detail) VALUES (?, 'correction', ?, ?)",
-				`correct-${slug}-${Date.now()}`,
+				`correct-${slug}-${crypto.randomUUID()}`,
 				slug,
 				JSON.stringify({ text, confidence }),
 			)
@@ -330,17 +347,21 @@ const opensentient = actor({
 				c.state.budgetState.x402AllocationPct = x402Pct
 			}
 		},
+
+		ingestDataset: async (c, datasetConfig: DatasetConfig) => {
+			await c.queue.send("commands", {
+				type: "ingest_dataset",
+				payload: { dataset: datasetConfig },
+			})
+		},
 	},
 })
 
 // ── Signal Processing (used inside workflow) ──────────────────────────
 
-// biome-ignore lint/suspicious/noExplicitAny: Rivet DB type is opaque, inferred at runtime
-type ActorDb = any
-
 type ProcessContext = {
 	state: SentientState
-	db: ActorDb
+	db: import("./types").ActorDb
 	broadcast: (event: string, payload: CalibrationEvent) => void
 	step: <T>(opts: {
 		name: string
@@ -477,8 +498,8 @@ async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise
 			}
 
 			// CONTRADICT / NEW_TERRITORY — falls through to Sandbox session
-		} catch {
-			// Triage failed — fall through to Sandbox session as fallback
+		} catch (err) {
+			console.warn("[triage] Triage failed, falling through to sandbox session:", err)
 		}
 	}
 
@@ -570,9 +591,6 @@ async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise
 			type: "sessionComplete",
 			summary,
 		})
-
-		// Teardown agent session (not the sandbox — it stays warm)
-		await teardownSession(sdk, summary.id)
 	} catch (error) {
 		ctx.broadcast("calibrationEvent", {
 			type: "sessionError",
@@ -622,13 +640,94 @@ async function logCost(
 ): Promise<void> {
 	await db.execute(
 		"INSERT INTO cost_log (id, type, cost_usd, input_tokens, output_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-		`cost-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+		`cost-${crypto.randomUUID()}`,
 		type,
 		costUsd,
 		usage?.inputTokens ?? 0,
 		usage?.outputTokens ?? 0,
 		Date.now(),
 	)
+}
+
+// ── Dataset Ingestion (used inside workflow) ─────────────────────────
+
+async function processDatasetIngestion(ctx: ProcessContext, config: DatasetConfig): Promise<void> {
+	// Budget check — dataset ingestion uses a sandbox session
+	if (!checkBudget(ctx.state, "session")) {
+		ctx.broadcast("calibrationEvent", {
+			type: "budgetExhausted",
+			spentUsd: ctx.state.budgetState.spentTodayUsd,
+			dailyBudgetUsd: ctx.state.budgetState.dailyBudgetUsd,
+		})
+		return
+	}
+
+	try {
+		// Ensure sandbox is running
+		const { sdk } = await ctx.step({
+			name: "dataset-ensure-sandbox",
+			timeout: 120_000,
+			maxRetries: 2,
+			retryBackoffBase: 5_000,
+			run: () => ensureSandbox(ctx.state),
+		})
+
+		// Mount workspace files
+		await ctx.step({
+			name: "dataset-mount-workspace",
+			timeout: 60_000,
+			run: () => mountWorkspace(sdk, ctx.state),
+		})
+
+		// Run dataset session — sandbox agent loads, parses, and writes output
+		const output: DatasetOutput = await ctx.step({
+			name: "run-dataset-session",
+			timeout: 5 * 60 * 1000,
+			run: () => runDatasetSession(sdk, ctx.state, config),
+		})
+
+		// Route output — enqueue signals or drain positions
+		if (config.mode === "signals" && output.signals) {
+			for (const signal of output.signals.slice(0, 50)) {
+				await processSignal(ctx, signal)
+			}
+		} else if (config.mode === "positions" && output.positions) {
+			// Drain positions through normal session drain with synthetic summary
+			const syntheticSummary: SessionSummary = {
+				id: `dataset-${crypto.randomUUID()}`,
+				triggerSignalId: "dataset-ingest",
+				tensionAtTrigger: 1.0,
+				startedAt: Date.now(),
+				completedAt: Date.now(),
+				newPositions: output.positions,
+				updatedPositions: [],
+				newInquiries: [],
+				layersApplied: ["signal-evaluation", "ingest-dataset"],
+				signalCredibility: config.credibility ?? 0.5,
+				sessionNarrative: `Dataset ingestion from ${output.source}: ${output.rowsProcessed} rows`,
+				domainTrajectory: "Expanding knowledge base via dataset ingestion",
+				watchSignals: [],
+				artifacts: { pullRequests: [] },
+			}
+			await drainSession(
+				{ db: ctx.db, state: ctx.state, broadcast: ctx.broadcast },
+				syntheticSummary,
+			)
+		}
+
+		ctx.broadcast("calibrationEvent", {
+			type: "datasetIngested",
+			source: output.source,
+			mode: config.mode,
+			rowsProcessed: output.rowsProcessed,
+		})
+	} catch (error) {
+		ctx.broadcast("calibrationEvent", {
+			type: "datasetError",
+			source: `${config.source}:${config.uri}`,
+			error: error instanceof Error ? error.message : String(error),
+		})
+	}
 }
 
 // ── Registry ──────────────────────────────────────────────────────────
