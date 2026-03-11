@@ -54,6 +54,39 @@ export interface ModelConfig {
 	sandbox: SandboxModelConfig
 }
 
+// ── Dataset Config ────────────────────────────────────────────────────
+
+export type DatasetSourceType = "huggingface" | "csv" | "parquet" | "json" | "jsonl" | "url"
+export type DatasetMode = "signals" | "positions" | "analysis"
+export type DatasetSchedule = "init" | "daily" | "manual"
+
+export interface DatasetConfig {
+	source: DatasetSourceType
+	uri: string // HF name, file path, or URL
+	config?: string // HF dataset config name
+	split?: string // HF split (train, test, validation)
+	mode: DatasetMode
+	limit?: number // max rows (default 1000)
+	column_map?: Record<string, string> // source col -> OS field
+	content_column?: string // which column maps to content/text
+	label_column?: string // which column maps to confidence/label
+	credibility?: number // default credibility for signals mode (0.0-1.0)
+	schedule?: DatasetSchedule // when to run ingestion
+}
+
+export interface DatasetOutput {
+	source: string
+	rowsProcessed: number
+	signals?: IngestSignal[]
+	positions?: PositionUpdate[]
+	summary?: SessionSummary
+}
+
+/** Returns true if the dataset source requires the sandbox (Python). */
+export function needsSandbox(source: DatasetSourceType): boolean {
+	return source === "huggingface" || source === "parquet"
+}
+
 // ── Repo Config ───────────────────────────────────────────────────────
 
 export interface RepoConfig {
@@ -84,7 +117,7 @@ export interface IngestSignal {
 // ── Agent Commands ────────────────────────────────────────────────────
 
 export interface AgentCommand {
-	type: "run" | "correct_position" | "update_config" | "initialize"
+	type: "run" | "correct_position" | "update_config" | "initialize" | "ingest_dataset"
 	payload: Record<string, unknown>
 }
 
@@ -186,6 +219,8 @@ export type CalibrationEvent =
 	| { type: "budgetExhausted"; spentUsd: number; dailyBudgetUsd: number }
 	| { type: "budgetReset"; dailyBudgetUsd: number }
 	| { type: "triageComplete"; action: TriageAction; slug: string }
+	| { type: "datasetIngested"; source: string; mode: DatasetMode; rowsProcessed: number }
+	| { type: "datasetError"; source: string; error: string }
 
 // ── Actor State ───────────────────────────────────────────────────────
 
@@ -207,6 +242,8 @@ export interface SentientState {
 	budgetState: BudgetState
 	triageEnabled: boolean
 	modelPricingCache: ModelPricingCache | null
+	/** Cached position embeddings keyed by slug. */
+	positionEmbeddings: Record<string, number[]>
 }
 
 // ── Triage ────────────────────────────────────────────────────────────
@@ -248,6 +285,13 @@ export interface ModelPricingCache {
 	fetchedAt: number // epoch ms
 }
 
+// ── Actor DB Interface ────────────────────────────────────────────────
+
+/** Minimal typed interface for Rivet's opaque DB handle. */
+export interface ActorDb {
+	execute: (sql: string, ...params: unknown[]) => Promise<unknown[]>
+}
+
 // ── Skill Metadata ────────────────────────────────────────────────────
 
 export type SkillRuntime = "actor" | "sandbox"
@@ -274,6 +318,20 @@ const ModelRoleSchema = z.object({
 const SandboxModelSchema = z.object({
 	harness: z.enum(["opencode", "claude", "codex", "amp"]),
 	name: z.string(),
+})
+
+const DatasetConfigSchema = z.object({
+	source: z.enum(["huggingface", "csv", "parquet", "json", "jsonl", "url"]),
+	uri: z.string(),
+	config: z.string().optional(),
+	split: z.string().optional(),
+	mode: z.enum(["signals", "positions", "analysis"]),
+	limit: z.number().optional(),
+	column_map: z.record(z.string(), z.string()).optional(),
+	content_column: z.string().optional(),
+	label_column: z.string().optional(),
+	credibility: z.number().min(0).max(1).optional(),
+	schedule: z.enum(["init", "daily", "manual"]).optional(),
 })
 
 const SkillSourceSchema = z.object({
@@ -335,6 +393,7 @@ export const SentientConfigSchema = z
 			public_positions: z.boolean(),
 			public_inquiries: z.boolean(),
 		}),
+		datasets: z.array(DatasetConfigSchema).optional(),
 		seed_positions: z
 			.array(
 				z.object({

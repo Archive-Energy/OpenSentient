@@ -93,6 +93,20 @@
 	//   "url": "https://os.archive.energy"
 	// },
 
+	// ── Datasets ──────────────────────────────────────────────────────
+	// Source-agnostic data ingestion. Lightweight formats (csv, json, jsonl, url)
+	// run on the actor; heavy formats (huggingface, parquet) run in the sandbox.
+	// "datasets": [
+	//   { "source": "huggingface", "uri": "user/domain-data", "split": "train",
+	//     "mode": "signals", "limit": 500, "content_column": "text",
+	//     "credibility": 0.7, "schedule": "init" },
+	//   { "source": "csv", "uri": "knowledge/seed-data.csv",
+	//     "mode": "positions", "content_column": "claim",
+	//     "label_column": "confidence" },
+	//   { "source": "url", "uri": "https://api.example.com/data.json",
+	//     "mode": "signals", "schedule": "daily", "limit": 100 }
+	// ],
+
 	// ── Seed State ────────────────────────────────────────────────────
 	"seed_positions": [
 		{ "slug": "initial-position", "text": "Initial position about the domain", "confidence": 0.8 }

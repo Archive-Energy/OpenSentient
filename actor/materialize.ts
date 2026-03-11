@@ -80,6 +80,7 @@ export function buildSandboxEnvVars(sandboxConfig: SandboxModelConfig): Record<s
 	if (process.env.GITHUB_TOKEN) envVars.GITHUB_TOKEN = process.env.GITHUB_TOKEN
 	if (process.env.PARSE_API_KEY) envVars.PARSE_API_KEY = process.env.PARSE_API_KEY
 	if (process.env.EXA_API_KEY) envVars.EXA_API_KEY = process.env.EXA_API_KEY
+	if (process.env.HF_TOKEN) envVars.HF_TOKEN = process.env.HF_TOKEN
 
 	return envVars
 }

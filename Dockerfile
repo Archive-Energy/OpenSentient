@@ -11,6 +11,12 @@ RUN npm install -g opencode-ai@latest
 RUN npm install -g @anthropic-ai/claude-code@latest
 RUN npm install -g skills@latest
 
+# Python data layer (for sandbox dataset operations)
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --break-system-packages \
+    datasets huggingface_hub pandas pyarrow requests
+
 WORKDIR /workspace
 EXPOSE 8080
 EXPOSE 4096

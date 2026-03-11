@@ -3,6 +3,63 @@ import type { Domain, IngestSignal, ModelRole, TokenUsage } from "./types"
 
 // ── Domain Relevance Gate ─────────────────────────────────────────────
 
+// Common English words that should never trigger domain relevance on their own
+const STOP_WORDS = new Set([
+	"about",
+	"after",
+	"again",
+	"being",
+	"between",
+	"could",
+	"different",
+	"every",
+	"first",
+	"found",
+	"great",
+	"having",
+	"house",
+	"important",
+	"intelligence",
+	"large",
+	"might",
+	"never",
+	"number",
+	"other",
+	"people",
+	"place",
+	"point",
+	"right",
+	"should",
+	"small",
+	"still",
+	"story",
+	"their",
+	"there",
+	"these",
+	"thing",
+	"think",
+	"those",
+	"three",
+	"through",
+	"under",
+	"using",
+	"value",
+	"water",
+	"where",
+	"which",
+	"while",
+	"world",
+	"would",
+	"write",
+	"years",
+])
+
+/** Word-boundary-aware check: ensures the term appears as a whole word, not a substring. */
+function containsWholeWord(text: string, term: string): boolean {
+	const pattern = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i")
+	return pattern.test(text)
+}
+
 export function isDomainRelevant(
 	signal: IngestSignal,
 	domain: Domain,
@@ -10,24 +67,26 @@ export function isDomainRelevant(
 ): boolean {
 	const text = signal.content.toLowerCase()
 
-	// Check domain boundaries
+	// Check domain boundaries (these are explicit terms — trust them)
 	for (const boundary of domain.boundaries) {
-		if (text.includes(boundary.toLowerCase())) return true
+		if (containsWholeWord(text, boundary)) return true
 	}
 
-	// Check domain description keywords (skip short words)
+	// Check domain description keywords — require multiple matches to reduce false positives
 	const domainTerms = domain.description
 		.toLowerCase()
 		.split(/\s+/)
-		.filter((t) => t.length > 4)
+		.filter((t) => t.length > 5 && !STOP_WORDS.has(t))
+	let domainHits = 0
 	for (const term of domainTerms) {
-		if (text.includes(term)) return true
+		if (containsWholeWord(text, term)) domainHits++
 	}
+	if (domainHits >= 2) return true
 
 	// Check existing position slugs as domain vocabulary
 	for (const slug of positionSlugs) {
-		const slugTerms = slug.split("-").filter((t) => t.length > 3)
-		const matches = slugTerms.filter((t) => text.includes(t))
+		const slugTerms = slug.split("-").filter((t) => t.length > 4 && !STOP_WORDS.has(t))
+		const matches = slugTerms.filter((t) => containsWholeWord(text, t))
 		if (matches.length >= 2) return true
 	}
 
@@ -98,7 +157,7 @@ export async function evaluateTension(
 	positionEmbeddings: Float32Array[],
 	embeddingConfig: ModelRole,
 	signalWeights: Record<string, number>,
-): Promise<{ tension: number; embeddingCost: TokenUsage }> {
+): Promise<{ tension: number; embeddingCost: TokenUsage; signalEmbedding?: Float32Array }> {
 	const zeroCost: TokenUsage = { inputTokens: 0, outputTokens: 0 }
 
 	// Manual /run or owner correction — always trigger
@@ -131,5 +190,5 @@ export async function evaluateTension(
 	const sourceWeight = signalWeights[signal.sourceProvider] ?? 1.0
 	const tension = (1 - maxSimilarity) * sourceWeight
 
-	return { tension, embeddingCost: embeddingUsage }
+	return { tension, embeddingCost: embeddingUsage, signalEmbedding }
 }

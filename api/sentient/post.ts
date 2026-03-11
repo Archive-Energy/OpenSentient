@@ -9,7 +9,7 @@ export async function handlePost(c: Context, route: string) {
 		case "signal": {
 			const body = await c.req.json()
 			const signal = {
-				id: `api-${Date.now()}`,
+				id: `api-${crypto.randomUUID()}`,
 				sourceProvider: "owner",
 				sourceMode: "api",
 				content: body.content,

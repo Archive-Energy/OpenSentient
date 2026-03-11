@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto"
 import type { Context } from "hono"
 import { Hono } from "hono"
 import { handleCalibration } from "./sentient/calibration"
@@ -14,7 +15,17 @@ const app = new Hono()
 const authMiddleware = async (c: Context, next: () => Promise<void>) => {
 	const apiKey = c.req.header("x-api-key") ?? c.req.header("authorization")?.replace("Bearer ", "")
 	if (!apiKey) return c.text("Unauthorized", 401)
-	// Unkey validation would go here — for now accept any key
+
+	const expected = process.env.API_KEY
+	if (!expected) return c.text("Server misconfigured: no API_KEY set", 500)
+
+	// Timing-safe comparison to prevent timing attacks
+	const a = new TextEncoder().encode(apiKey)
+	const b = new TextEncoder().encode(expected)
+	if (a.byteLength !== b.byteLength || !timingSafeEqual(a, b)) {
+		return c.text("Unauthorized", 401)
+	}
+
 	await next()
 }
 

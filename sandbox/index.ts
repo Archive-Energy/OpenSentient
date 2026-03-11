@@ -2,6 +2,8 @@ import { Daytona } from "@daytonaio/sdk"
 import { SandboxAgent } from "sandbox-agent"
 import { buildHarnessConfig, buildSandboxEnvVars } from "../actor/materialize"
 import type {
+	DatasetConfig,
+	DatasetOutput,
 	IngestSignal,
 	RepoConfig,
 	SentientState,
@@ -27,8 +29,8 @@ export async function ensureSandbox(
 				sandbox = await createFreshSandbox(daytona, state)
 				state.sandboxId = sandbox.id
 			}
-		} catch {
-			// Sandbox not found — create fresh
+		} catch (err) {
+			console.warn(`[sandbox] Failed to retrieve sandbox ${state.sandboxId}, creating fresh:`, err)
 			sandbox = await createFreshSandbox(daytona, state)
 			state.sandboxId = sandbox.id
 		}
@@ -196,7 +198,7 @@ export async function runSession(
 	const summary = JSON.parse(outputText) as SessionSummary
 
 	// Ensure required fields
-	summary.id = summary.id || `session-${Date.now()}`
+	summary.id = summary.id || `session-${crypto.randomUUID()}`
 	summary.startedAt = summary.startedAt || Date.now() - 60_000
 	summary.completedAt = summary.completedAt || Date.now()
 	summary.triggerSignalId = trigger.id
@@ -212,14 +214,107 @@ export async function runSession(
 	return summary
 }
 
-// ── Teardown Session ──────────────────────────────────────────────────
+// ── Dataset Session ──────────────────────────────────────────────────
 
-export async function teardownSession(sdk: SandboxAgent, sessionId: string): Promise<void> {
-	try {
-		await sdk.destroySession(sessionId)
-	} catch {
-		// Session may already be destroyed
+export async function runDatasetSession(
+	sdk: SandboxAgent,
+	state: SentientState,
+	config: DatasetConfig,
+): Promise<DatasetOutput> {
+	const harness = state.modelConfig.sandbox.harness
+	const model = state.modelConfig.sandbox.name
+
+	// Mount loader.py into sandbox
+	const loaderPath = "skills/.system/ingest-dataset/loader.py"
+	const loaderFile = Bun.file(loaderPath)
+	if (await loaderFile.exists()) {
+		await sdk.mkdirFs({ path: "/workspace/skills/.system/ingest-dataset" })
+		await sdk.writeFsFile(
+			{ path: "/workspace/skills/.system/ingest-dataset/loader.py" },
+			await loaderFile.text(),
+		)
 	}
+
+	// Write dataset request config
+	await sdk.mkdirFs({ path: "/workspace/output" })
+	await sdk.writeFsFile(
+		{ path: "/workspace/output/dataset-request.json" },
+		JSON.stringify(config, null, 2),
+	)
+
+	// Create agent session
+	const session = await sdk.createSession({
+		agent: harness === "opencode" ? "opencode" : harness,
+		model,
+		sessionInit: { cwd: "/workspace" },
+	})
+
+	// Build the dataset prompt
+	const prompt = buildDatasetPrompt(config)
+	await session.prompt([{ type: "text", text: prompt }])
+
+	// Determine output file based on mode
+	const outputFile =
+		config.mode === "analysis"
+			? "/workspace/output/session-summary.json"
+			: config.mode === "signals"
+				? "/workspace/output/dataset-signals.json"
+				: "/workspace/output/dataset-positions.json"
+
+	// Read output
+	const outputBytes = await sdk.readFsFile({ path: outputFile })
+	const outputText = new TextDecoder().decode(outputBytes)
+	const output = JSON.parse(outputText) as DatasetOutput
+
+	await sdk.destroySession(session.id)
+
+	return output
+}
+
+function buildDatasetPrompt(config: DatasetConfig): string {
+	const modeInstructions = {
+		signals: `Write output to /workspace/output/dataset-signals.json with schema: { source, rowsProcessed, signals: [{ id, sourceProvider: "dataset", sourceMode: "batch", content, urgency: "medium", credibility, timestamp, metadata }] }`,
+		positions: `Write output to /workspace/output/dataset-positions.json with schema: { source, rowsProcessed, positions: [{ slug, text, confidence, surpriseDelta: 0, priorConfidence: 0, status: "settled" }] }`,
+		analysis:
+			"Analyze the dataset using the Alethic Method. Write a standard SessionSummary to /workspace/output/session-summary.json",
+	}
+
+	const loaderArgs = [
+		`--source ${config.source}`,
+		`--uri "${config.uri}"`,
+		`--mode ${config.mode}`,
+		`--limit ${config.limit ?? 1000}`,
+		config.config ? `--config "${config.config}"` : "",
+		config.split ? `--split "${config.split}"` : "",
+		config.content_column ? `--content-col "${config.content_column}"` : "",
+		config.label_column ? `--label-col "${config.label_column}"` : "",
+		config.credibility !== undefined ? `--credibility ${config.credibility}` : "",
+		config.column_map ? `--column-map '${JSON.stringify(config.column_map)}'` : "",
+	]
+		.filter(Boolean)
+		.join(" ")
+
+	const outputFilename = config.mode === "analysis" ? "session-summary" : `dataset-${config.mode}`
+
+	return [
+		"# Dataset Ingestion Task",
+		"",
+		"Read the dataset request at /workspace/output/dataset-request.json.",
+		"",
+		"Use the Python loader script to process the dataset:",
+		"```bash",
+		`python3 /workspace/skills/.system/ingest-dataset/loader.py ${loaderArgs} > /workspace/output/${outputFilename}.json`,
+		"```",
+		"",
+		"Or use Python directly if the loader doesn't fit your needs.",
+		"",
+		"## Output Requirements",
+		modeInstructions[config.mode],
+		"",
+		config.mode === "analysis"
+			? "Apply domain reasoning to the dataset contents. Identify positions, contradictions, and inquiries."
+			: `Transform each row into the output schema. Use content_column="${config.content_column ?? "auto-detect"}" for the main text field.`,
+	].join("\n")
 }
 
 // ── Context Building ──────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { actor, event, queue, setup } from "rivetkit"
 import { workflow } from "rivetkit/workflow"
-import { ensureSandbox, mountWorkspace, runSession, teardownSession } from "../sandbox/index"
+import type { SandboxAgent } from "sandbox-agent"
+import { ensureSandbox, mountWorkspace, runDatasetSession, runSession } from "../sandbox/index"
 import {
 	DEFAULT_BUDGET,
 	calculateCost,
@@ -10,20 +11,30 @@ import {
 	recordCost,
 	resetBudgetIfNewDay,
 } from "./budget"
-import { commitProof, drainSession, rejectProof, validateSummary } from "./drain"
+import { ingestDatasetLocal } from "./dataset"
+import {
+	commitProof,
+	drainDatasetPositions,
+	drainSession,
+	rejectProof,
+	validateSummary,
+} from "./drain"
 import { parseSentientConfig } from "./materialize"
 import { actorDb } from "./schema"
 import { runActorSkill } from "./skill-runner"
-import { evaluateTension } from "./tension"
+import { embed, evaluateTension } from "./tension"
 import type {
+	ActorDb,
 	AgentCommand,
 	CalibrationEvent,
 	CalibrationState,
+	DatasetConfig,
 	IngestSignal,
 	SentientState,
 	SessionSummary,
 	TriageResult,
 } from "./types"
+import { needsSandbox } from "./types"
 
 // ── Actor Definition ──────────────────────────────────────────────────
 
@@ -56,6 +67,7 @@ const opensentient = actor({
 		budgetState: { ...DEFAULT_BUDGET },
 		triageEnabled: true,
 		modelPricingCache: null,
+		positionEmbeddings: {},
 	}),
 
 	events: {
@@ -91,7 +103,7 @@ const opensentient = actor({
 				if (cmd.type === "run") {
 					// Manual run — create a synthetic signal
 					const signal: IngestSignal = {
-						id: `manual-${Date.now()}`,
+						id: `manual-${crypto.randomUUID()}`,
 						sourceProvider: "owner",
 						sourceMode: "command",
 						content: (cmd.payload.reason as string) ?? "Manual session triggered",
@@ -100,6 +112,11 @@ const opensentient = actor({
 						timestamp: Date.now(),
 					}
 					await processSignal(loopCtx as unknown as ProcessContext, signal)
+				} else if (cmd.type === "ingest_dataset") {
+					await processDatasetIngestion(
+						loopCtx as unknown as ProcessContext,
+						cmd.payload.dataset as DatasetConfig,
+					)
 				}
 				return // next loop iteration
 			}
@@ -170,8 +187,18 @@ const opensentient = actor({
 			// v0.2: Fetch model pricing on init
 			try {
 				c.state.modelPricingCache = await fetchModelPricing(null)
-			} catch {
-				// Non-fatal — pricing cache will be null, costs estimated at 0
+			} catch (err) {
+				console.warn("[init] Failed to fetch model pricing:", err)
+			}
+
+			// v0.3: Enqueue init-scheduled dataset ingestions
+			for (const ds of config.datasets ?? []) {
+				if (ds.schedule === "init") {
+					await c.queue.send("commands", {
+						type: "ingest_dataset",
+						payload: { dataset: ds },
+					})
+				}
 			}
 		},
 
@@ -199,12 +226,12 @@ const opensentient = actor({
 			// v0.2: Refresh pricing cache daily
 			try {
 				c.state.modelPricingCache = await fetchModelPricing(c.state.modelPricingCache)
-			} catch {
-				// Non-fatal
+			} catch (err) {
+				console.warn("[daily] Failed to refresh model pricing:", err)
 			}
 
 			const signal: IngestSignal = {
-				id: `daily-scan-${Date.now()}`,
+				id: `daily-scan-${crypto.randomUUID()}`,
 				sourceProvider: "system",
 				sourceMode: "poll",
 				content: "Scheduled daily domain scan",
@@ -213,6 +240,11 @@ const opensentient = actor({
 				timestamp: Date.now(),
 			}
 			await c.queue.send("signals", signal)
+
+			// v0.3: Enqueue daily-scheduled dataset ingestions
+			// Note: datasets config is not in actor state — would need to re-parse
+			// or store in state. For now, daily datasets are triggered via API.
+
 			// Re-schedule unconditionally
 			c.schedule.after(24 * 60 * 60 * 1000, "enqueueDailyScan")
 		},
@@ -258,7 +290,7 @@ const opensentient = actor({
 			)
 			// Enqueue a signal to investigate this tension
 			const signal: IngestSignal = {
-				id: `tension-confirmed-${slug}-${Date.now()}`,
+				id: `tension-confirmed-${slug}-${crypto.randomUUID()}`,
 				sourceProvider: "owner",
 				sourceMode: "command",
 				content: `Owner confirmed tension on position: ${slug}. Investigate.`,
@@ -286,7 +318,7 @@ const opensentient = actor({
 			// Write calibration log
 			await c.db.execute(
 				"INSERT INTO calibration (id, type, slug, detail) VALUES (?, 'tension_dismissed', ?, ?)",
-				`dismiss-${slug}-${Date.now()}`,
+				`dismiss-${slug}-${crypto.randomUUID()}`,
 				slug,
 				JSON.stringify({ weightAdjustment: weightAdj }),
 			)
@@ -303,7 +335,7 @@ const opensentient = actor({
 			// Write correction as calibration log
 			await c.db.execute(
 				"INSERT INTO calibration (id, type, slug, detail) VALUES (?, 'correction', ?, ?)",
-				`correct-${slug}-${Date.now()}`,
+				`correct-${slug}-${crypto.randomUUID()}`,
 				slug,
 				JSON.stringify({ text, confidence }),
 			)
@@ -330,13 +362,17 @@ const opensentient = actor({
 				c.state.budgetState.x402AllocationPct = x402Pct
 			}
 		},
+
+		ingestDataset: async (c, datasetConfig: DatasetConfig) => {
+			await c.queue.send("commands", {
+				type: "ingest_dataset",
+				payload: { dataset: datasetConfig },
+			})
+		},
 	},
 })
 
 // ── Signal Processing (used inside workflow) ──────────────────────────
-
-// biome-ignore lint/suspicious/noExplicitAny: Rivet DB type is opaque, inferred at runtime
-type ActorDb = any
 
 type ProcessContext = {
 	state: SentientState
@@ -350,6 +386,38 @@ type ProcessContext = {
 		run: () => T
 	}) => Promise<T>
 	rollbackCheckpoint: (name: string) => Promise<void>
+}
+
+async function withSandbox(ctx: ProcessContext, stepPrefix = ""): Promise<SandboxAgent> {
+	const prefix = stepPrefix ? `${stepPrefix}-` : ""
+	const { sdk } = await ctx.step({
+		name: `${prefix}ensure-sandbox`,
+		timeout: 120_000,
+		maxRetries: 2,
+		retryBackoffBase: 5_000,
+		run: () => ensureSandbox(ctx.state),
+	})
+	await ctx.step({
+		name: `${prefix}mount-workspace`,
+		timeout: 60_000,
+		run: () => mountWorkspace(sdk, ctx.state),
+	})
+	return sdk
+}
+
+/** Embed and cache position texts so future tension evaluations use them. */
+async function cachePositionEmbeddings(
+	ctx: ProcessContext,
+	positions: Array<{ slug: string; text: string }>,
+): Promise<void> {
+	for (const p of positions) {
+		try {
+			const { embedding } = await embed(p.text, ctx.state.modelConfig.embedding)
+			ctx.state.positionEmbeddings[p.slug] = Array.from(embedding)
+		} catch {
+			// Non-fatal — position will be re-embedded on next cache miss
+		}
+	}
 }
 
 async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise<void> {
@@ -370,12 +438,17 @@ async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise
 	}>
 	const positionSlugs = positions.map((p) => p.slug)
 
+	// Build position embeddings array from cache (order matches positionSlugs)
+	const positionEmbeddings: Float32Array[] = positionSlugs
+		.filter((slug) => ctx.state.positionEmbeddings[slug])
+		.map((slug) => new Float32Array(ctx.state.positionEmbeddings[slug]))
+
 	// Evaluate tension (domain relevance + embedding similarity)
-	const { tension, embeddingCost } = await evaluateTension(
+	const { tension, embeddingCost, signalEmbedding } = await evaluateTension(
 		signal,
 		ctx.state.domain,
 		positionSlugs,
-		[], // Position embeddings — would be cached in production
+		positionEmbeddings,
 		ctx.state.modelConfig.embedding,
 		ctx.state.signalWeights,
 	)
@@ -477,8 +550,13 @@ async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise
 			}
 
 			// CONTRADICT / NEW_TERRITORY — falls through to Sandbox session
-		} catch {
-			// Triage failed — fall through to Sandbox session as fallback
+		} catch (err) {
+			console.warn("[triage] Triage failed, falling through to sandbox session:", err)
+			ctx.broadcast("calibrationEvent", {
+				type: "sessionError",
+				error: `Triage failed: ${err instanceof Error ? err.message : String(err)}`,
+				retryable: true,
+			})
 		}
 	}
 
@@ -503,21 +581,7 @@ async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise
 	await ctx.rollbackCheckpoint("session-checkpoint")
 
 	try {
-		// Ensure sandbox is running
-		const { sandbox, sdk } = await ctx.step({
-			name: "ensure-sandbox",
-			timeout: 120_000,
-			maxRetries: 2,
-			retryBackoffBase: 5_000,
-			run: () => ensureSandbox(ctx.state),
-		})
-
-		// Mount workspace files
-		await ctx.step({
-			name: "mount-workspace",
-			timeout: 60_000,
-			run: () => mountWorkspace(sdk, ctx.state),
-		})
+		const sdk = await withSandbox(ctx)
 
 		// Run agent session
 		const summary: SessionSummary = await ctx.step({
@@ -541,6 +605,9 @@ async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise
 			name: "drain-session",
 			run: () => drainSession({ db: ctx.db, state: ctx.state, broadcast: ctx.broadcast }, summary),
 		})
+
+		// Cache embeddings for new/updated positions
+		await cachePositionEmbeddings(ctx, [...summary.newPositions, ...summary.updatedPositions])
 
 		// v0.2: Record session cost from sandbox token usage
 		if (summary.tokenUsage && ctx.state.modelPricingCache) {
@@ -570,9 +637,6 @@ async function processSignal(ctx: ProcessContext, signal: IngestSignal): Promise
 			type: "sessionComplete",
 			summary,
 		})
-
-		// Teardown agent session (not the sandbox — it stays warm)
-		await teardownSession(sdk, summary.id)
 	} catch (error) {
 		ctx.broadcast("calibrationEvent", {
 			type: "sessionError",
@@ -622,13 +686,95 @@ async function logCost(
 ): Promise<void> {
 	await db.execute(
 		"INSERT INTO cost_log (id, type, cost_usd, input_tokens, output_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-		`cost-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+		`cost-${crypto.randomUUID()}`,
 		type,
 		costUsd,
 		usage?.inputTokens ?? 0,
 		usage?.outputTokens ?? 0,
 		Date.now(),
 	)
+}
+
+// ── Dataset Ingestion (used inside workflow) ─────────────────────────
+
+async function processDatasetIngestion(ctx: ProcessContext, config: DatasetConfig): Promise<void> {
+	// Budget check
+	const costType = needsSandbox(config.source) ? "session" : "triage"
+	if (!checkBudget(ctx.state, costType)) {
+		ctx.broadcast("calibrationEvent", {
+			type: "budgetExhausted",
+			spentUsd: ctx.state.budgetState.spentTodayUsd,
+			dailyBudgetUsd: ctx.state.budgetState.dailyBudgetUsd,
+		})
+		return
+	}
+
+	try {
+		let output: import("./types").DatasetOutput
+
+		if (needsSandbox(config.source)) {
+			// Heavy format — run in sandbox
+			const sdk = await withSandbox(ctx, "dataset")
+
+			output = await ctx.step({
+				name: "run-dataset-session",
+				timeout: 5 * 60 * 1000,
+				run: () => runDatasetSession(sdk, ctx.state, config),
+			})
+		} else {
+			// Lightweight format — run on actor
+			output = await ctx.step({
+				name: "ingest-dataset-local",
+				timeout: 60_000,
+				run: () => ingestDatasetLocal(config),
+			})
+		}
+
+		// Route output based on mode
+		if (config.mode === "signals" && output.signals) {
+			for (const signal of output.signals) {
+				await ctx.db.execute(
+					"INSERT INTO signals (id, source_provider, source_mode, content, urgency, credibility) VALUES (?, ?, ?, ?, ?, ?)",
+					signal.id,
+					signal.sourceProvider,
+					signal.sourceMode,
+					signal.content,
+					signal.urgency,
+					signal.credibility,
+				)
+			}
+			// Process first 50 directly, rest are logged for future tension evaluation
+			for (const signal of output.signals.slice(0, 50)) {
+				await processSignal(ctx, signal)
+			}
+		} else if (config.mode === "positions" && output.positions) {
+			await drainDatasetPositions(
+				{ db: ctx.db, state: ctx.state, broadcast: ctx.broadcast },
+				output.positions,
+				output.source,
+			)
+		} else if (config.mode === "analysis" && output.summary) {
+			if (validateSummary(output.summary)) {
+				await drainSession(
+					{ db: ctx.db, state: ctx.state, broadcast: ctx.broadcast },
+					output.summary,
+				)
+			}
+		}
+
+		ctx.broadcast("calibrationEvent", {
+			type: "datasetIngested",
+			source: output.source,
+			mode: config.mode,
+			rowsProcessed: output.rowsProcessed,
+		})
+	} catch (error) {
+		ctx.broadcast("calibrationEvent", {
+			type: "datasetError",
+			source: `${config.source}:${config.uri}`,
+			error: error instanceof Error ? error.message : String(error),
+		})
+	}
 }
 
 // ── Registry ──────────────────────────────────────────────────────────

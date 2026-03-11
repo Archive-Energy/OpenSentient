@@ -1,4 +1,5 @@
 import type {
+	ActorDb,
 	CalibrationEvent,
 	IngestSignal,
 	InquiryUpdate,
@@ -116,7 +117,7 @@ export function calibrationEntryToMarkdown(
 	slug: string,
 	detail: Record<string, unknown>,
 ): string {
-	const id = `${type}-${slug}-${Date.now()}`
+	const id = `${type}-${slug}-${crypto.randomUUID()}`
 	return [
 		"---",
 		`id: ${id}`,
@@ -130,10 +131,10 @@ export function calibrationEntryToMarkdown(
 	].join("\n")
 }
 
-// ── Drain Session ─────────────────────────────────────────────────────
+// ── Drain Context & Shared Helpers ────────────────────────────────────
 
 interface DrainContext {
-	db: { execute: (sql: string, ...params: unknown[]) => Promise<unknown[]> }
+	db: ActorDb
 	state: {
 		pendingProofs: PositionProofOfWork[]
 		calibrationThreshold: number
@@ -142,76 +143,119 @@ interface DrainContext {
 	broadcast: (event: string, payload: CalibrationEvent) => void
 }
 
-export async function drainSession(
+type DrainResult = { proofsSurfaced: PositionProofOfWork[]; autoCommitted: PositionUpdate[] }
+
+/** Pending file write accumulated during drain, flushed after SQLite commit. */
+interface PendingWrite {
+	path: string
+	content: string
+}
+
+/** Shared position drain: proof gate, SQLite upserts, pending markdown writes. */
+async function drainPositions(
 	ctx: DrainContext,
-	summary: SessionSummary,
-): Promise<{ proofsSurfaced: PositionProofOfWork[]; autoCommitted: PositionUpdate[] }> {
+	positions: PositionUpdate[],
+	sessionId: string,
+	triggerSignalId: string,
+	pendingWrites: PendingWrite[],
+): Promise<DrainResult> {
 	const proofsSurfaced: PositionProofOfWork[] = []
 	const autoCommitted: PositionUpdate[] = []
 
-	// Write session record markdown
-	const recordMd = sessionRecordToMarkdown(summary)
-	await Bun.write(`knowledge/record/${summary.id}.md`, recordMd)
-
-	// Process all position updates
-	const allPositions = [...summary.newPositions, ...summary.updatedPositions]
-	for (const position of allPositions) {
+	for (const position of positions) {
 		if (position.surpriseDelta > ctx.state.calibrationThreshold) {
-			// High surprise — surface as proof for human review
 			const proof: PositionProofOfWork = {
 				index: ctx.state.pendingProofs.length + proofsSurfaced.length + 1,
 				slug: position.slug,
-				sourceSignalId: summary.triggerSignalId,
+				sourceSignalId: triggerSignalId,
 				priorConfidence: position.priorConfidence,
 				posteriorConfidence: position.confidence,
 				surpriseDelta: position.surpriseDelta,
 				text: position.text,
-				sessionId: summary.id,
+				sessionId,
 			}
 			proofsSurfaced.push(proof)
 			position.status = "pending_review"
-
 			ctx.broadcast("calibrationEvent", { type: "proofSurfaced", proof })
 		} else {
-			// Low surprise — auto-commit
 			autoCommitted.push(position)
 		}
 
-		// Write position markdown
-		const positionMd = positionToMarkdown(position, summary.id)
-		await Bun.write(`knowledge/positions/${position.slug}.md`, positionMd)
+		pendingWrites.push({
+			path: `knowledge/positions/${position.slug}.md`,
+			content: positionToMarkdown(position, sessionId),
+		})
 	}
 
-	// Write inquiry markdown
+	// SQLite position upserts
+	for (const p of positions) {
+		await ctx.db.execute(
+			`INSERT INTO positions (slug, confidence, surprise_delta, status, source_session, text, wikilinks, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(slug) DO UPDATE SET
+         confidence = excluded.confidence,
+         surprise_delta = excluded.surprise_delta,
+         status = excluded.status,
+         source_session = excluded.source_session,
+         text = excluded.text,
+         wikilinks = excluded.wikilinks,
+         updated_at = datetime('now')`,
+			p.slug,
+			p.confidence,
+			p.surpriseDelta,
+			p.status,
+			`record/${sessionId}.md`,
+			p.text,
+			JSON.stringify(p.wikilinks ?? []),
+		)
+	}
+
+	ctx.state.pendingProofs.push(...proofsSurfaced)
+	ctx.state.sessionCount += 1
+
+	return { proofsSurfaced, autoCommitted }
+}
+
+/** Flush pending writes to disk. Called after successful SQLite commit. */
+async function flushWrites(writes: PendingWrite[]): Promise<void> {
+	for (const w of writes) {
+		await Bun.write(w.path, w.content)
+	}
+}
+
+// ── Drain Session ─────────────────────────────────────────────────────
+
+export async function drainSession(
+	ctx: DrainContext,
+	summary: SessionSummary,
+): Promise<DrainResult> {
+	const allPositions = [...summary.newPositions, ...summary.updatedPositions]
+	const pendingWrites: PendingWrite[] = []
+
+	// Queue session record markdown
+	pendingWrites.push({
+		path: `knowledge/record/${summary.id}.md`,
+		content: sessionRecordToMarkdown(summary),
+	})
+
+	// Queue inquiry markdown
 	for (const inquiry of summary.newInquiries) {
-		const inquiryMd = inquiryToMarkdown(inquiry)
-		await Bun.write(`knowledge/inquiries/${inquiry.slug}.md`, inquiryMd)
+		pendingWrites.push({
+			path: `knowledge/inquiries/${inquiry.slug}.md`,
+			content: inquiryToMarkdown(inquiry),
+		})
 	}
 
 	// SQLite atomic transaction
 	await ctx.db.execute("BEGIN")
 	try {
-		for (const p of allPositions) {
-			await ctx.db.execute(
-				`INSERT INTO positions (slug, confidence, surprise_delta, status, source_session, text, wikilinks, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-         ON CONFLICT(slug) DO UPDATE SET
-           confidence = excluded.confidence,
-           surprise_delta = excluded.surprise_delta,
-           status = excluded.status,
-           source_session = excluded.source_session,
-           text = excluded.text,
-           wikilinks = excluded.wikilinks,
-           updated_at = datetime('now')`,
-				p.slug,
-				p.confidence,
-				p.surpriseDelta,
-				p.status,
-				`record/${summary.id}.md`,
-				p.text,
-				JSON.stringify(p.wikilinks ?? []),
-			)
-		}
+		const result = await drainPositions(
+			ctx,
+			allPositions,
+			summary.id,
+			summary.triggerSignalId,
+			pendingWrites,
+		)
 
 		for (const i of summary.newInquiries) {
 			await ctx.db.execute(
@@ -245,16 +289,80 @@ export async function drainSession(
 		)
 
 		await ctx.db.execute("COMMIT")
+
+		// Flush markdown to disk only after successful commit
+		await flushWrites(pendingWrites)
+
+		return result
 	} catch (error) {
 		await ctx.db.execute("ROLLBACK")
 		throw error
 	}
+}
 
-	// Add proofs to pending state
-	ctx.state.pendingProofs.push(...proofsSurfaced)
-	ctx.state.sessionCount += 1
+// ── Drain Dataset Positions ───────────────────────────────────────────
 
-	return { proofsSurfaced, autoCommitted }
+export async function drainDatasetPositions(
+	ctx: DrainContext,
+	positions: PositionUpdate[],
+	datasetSource: string,
+): Promise<DrainResult> {
+	const syntheticSessionId = `dataset-${crypto.randomUUID()}`
+	const pendingWrites: PendingWrite[] = []
+
+	// Queue synthetic session record
+	const recordMd = [
+		"---",
+		`id: ${syntheticSessionId}`,
+		"trigger_signal_id: dataset-ingest",
+		"tension_at_trigger: 1.0",
+		`started_at: ${new Date().toISOString()}`,
+		`completed_at: ${new Date().toISOString()}`,
+		`positions_updated: ${positions.length}`,
+		"inquiries_opened: 0",
+		"layers_applied: [ingest-dataset]",
+		"---",
+		"",
+		`# Dataset Ingestion: ${datasetSource}`,
+		"",
+		`Ingested ${positions.length} positions from dataset.`,
+	].join("\n")
+	pendingWrites.push({ path: `knowledge/record/${syntheticSessionId}.md`, content: recordMd })
+
+	// SQLite atomic transaction
+	await ctx.db.execute("BEGIN")
+	try {
+		const result = await drainPositions(
+			ctx,
+			positions,
+			syntheticSessionId,
+			"dataset-ingest",
+			pendingWrites,
+		)
+
+		await ctx.db.execute(
+			`INSERT INTO record (id, trigger_signal_id, tension_at_trigger, started_at, completed_at, positions_updated, inquiries_opened, narrative)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			syntheticSessionId,
+			"dataset-ingest",
+			1.0,
+			new Date().toISOString(),
+			new Date().toISOString(),
+			positions.length,
+			0,
+			`Dataset ingestion from ${datasetSource}`,
+		)
+
+		await ctx.db.execute("COMMIT")
+
+		// Flush markdown to disk only after successful commit
+		await flushWrites(pendingWrites)
+
+		return result
+	} catch (error) {
+		await ctx.db.execute("ROLLBACK")
+		throw error
+	}
 }
 
 // ── Commit Proof (Accept / Adjust) ────────────────────────────────────
@@ -296,11 +404,12 @@ export async function commitProof(
 	}
 
 	const calMd = calibrationEntryToMarkdown(calType, slug, calDetail)
-	await Bun.write(`knowledge/calibration/accept-${slug}-${Date.now()}.md`, calMd)
+	const acceptCalId = `accept-${slug}-${crypto.randomUUID()}`
+	await Bun.write(`knowledge/calibration/${acceptCalId}.md`, calMd)
 
 	await ctx.db.execute(
 		"INSERT INTO calibration (id, type, slug, detail) VALUES (?, ?, ?, ?)",
-		`accept-${slug}-${Date.now()}`,
+		acceptCalId,
 		calType,
 		slug,
 		JSON.stringify(calDetail),
@@ -349,11 +458,12 @@ export async function rejectProof(
 		attemptedConfidence: proof.posteriorConfidence,
 		note,
 	})
-	await Bun.write(`knowledge/calibration/reject-${slug}-${Date.now()}.md`, calMd)
+	const rejectCalId = `reject-${slug}-${crypto.randomUUID()}`
+	await Bun.write(`knowledge/calibration/${rejectCalId}.md`, calMd)
 
 	await ctx.db.execute(
 		"INSERT INTO calibration (id, type, slug, detail) VALUES (?, 'proof_rejected', ?, ?)",
-		`reject-${slug}-${Date.now()}`,
+		rejectCalId,
 		slug,
 		JSON.stringify({ note, prior: proof.priorConfidence, attempted: proof.posteriorConfidence }),
 	)
@@ -366,7 +476,7 @@ export async function rejectProof(
 
 	// Create correction signal
 	const correctionSignal: IngestSignal = {
-		id: `correction-${slug}-${Date.now()}`,
+		id: `correction-${slug}-${crypto.randomUUID()}`,
 		sourceProvider: "correction",
 		sourceMode: "system",
 		content: `Owner correction for position "${slug}": ${note}`,
